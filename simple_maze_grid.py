@@ -1,31 +1,31 @@
 import math
 import random
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 
+import matplotlib.pyplot as plt
+from matplotlib import patches
 import numpy as np
 import pygame
 import gymnasium as gym
 from gymnasium import spaces
-import matplotlib.pyplot as plt
 
 from path_planner import dubins_path
 
 
 class SimpleMazeGrid(gym.Env):
     """
-    EN 좌표계 (E: 동(+x), N: 북(+y))
-    Gymnasium 환경
+    EN 좌표계 (E:+x, N:+y) 기반 Gymnasium 환경
 
+    주요 기능
     - Dubins 전역 경로 생성
-    - 경로 추종(LOS 기반 eta) + (옵션) 장애물 관측(로컬 grid / LIDAR)
-    - action: yaw rate(w) 직접 제어 [-1,1] -> [-max_w, max_w]
+    - LOS 기반 path tracking
+    - 원형 장애물 / hard zone / safety zone 관리
+    - LIDAR 기반 local observation 생성
+    - 논문용 figure 저장 함수 제공
     """
 
     metadata = {"render_modes": ["human"]}
 
-    # =========================
-    # Init
-    # =========================
     def __init__(
         self,
         global_map_size: int,
@@ -36,71 +36,67 @@ class SimpleMazeGrid(gym.Env):
         render_option: bool = False,
         random_seed: Optional[int] = None,
         spec=None,
-        # obstacles
         obstacle_count: int = 0,
-        obstacle_min_radius: float = 1.0,
-        obstacle_max_radius: float = 3.0,
-        # sensor range
+        obstacle_min_radius: float = 2.0,
+        obstacle_max_radius: float = 10.0,
         sensor_range: Optional[float] = None,
-        # lidar
         use_lidar_edges: bool = True,
         lidar_num_rays: int = 360,
         lidar_fov: float = 2 * math.pi,
         reference_L: Optional[float] = None,
+        hard_zone: float = 2.0,
+        safety_zone: float = 4.0,
+        obstacle_layout: str = "auto",
+        corridor_half_width: float = 2.5,
+        random_path_clearance: float = 1.5,
+        show_safety_ring: bool = True,
     ):
         super().__init__()
 
-        # ---- Core params ----
         self.global_map_size = int(global_map_size)
         self.local_map_size = int(local_map_size)
         self.dt = float(dt)
         self.render_option = bool(render_option)
         self.spec = spec
 
-        # ---- Motion ----
         self.v = float(v)
         self.w = 0.0
         self.min_w = float(w[0])
         self.max_w = float(w[1])
 
-        # Dubins planner
         self.R = self.v / max(self.max_w, 1e-9)
         self.path_planner = dubins_path(1 / self.R, 0.1)
         self.extension_len = 80
 
         self.max_steps = 3000
         self.terminated_radius = 3.0
+        self.radius = 150
 
-        # ---- History ----
         self.hist_len = 1
         self.w_hist: List[float] = [0.0] * self.hist_len
         self.eta_hist: List[float] = [0.0] * self.hist_len
 
-        # ---- Sensor range ----
         self.sensor_range = float(sensor_range) if sensor_range is not None else (self.local_map_size / 2.0)
         if self.sensor_range <= 0:
             raise ValueError("sensor_range must be > 0")
-
-        # Reference lookahead distance
         self.reference_L = float(reference_L) if reference_L is not None else (0.8 * self.sensor_range)
 
-        # ---- LIDAR ----
         self.use_lidar_edges = bool(use_lidar_edges)
         self.lidar_num_rays = int(lidar_num_rays)
         self.lidar_fov = float(lidar_fov)
         self.lidar_max_range = float(self.sensor_range)
 
-        # ---- Obstacles / safety ----
         self.obstacle_count = int(obstacle_count)
         self.obstacle_min_r = float(obstacle_min_radius)
         self.obstacle_max_r = float(obstacle_max_radius)
+        self.agent_radius = 0.0
+        self.hard_zone = float(hard_zone)
+        self.safety_zone = float(safety_zone)
+        self.obstacle_layout = str(obstacle_layout)
+        self.corridor_half_width = float(corridor_half_width)
+        self.random_path_clearance = float(random_path_clearance)
+        self.show_safety_ring = bool(show_safety_ring)
 
-        self.radius = 150
-        self.agent_radius = 0.0 #로봇의 물리적인 크기, 논문에 넣을거면 넣어도 괜찮음
-        self.safety_zone = 4.0  # 충돌하진 않았지만 위험할 정도로 가까운 상태를 평가
-        self.hard_zone = 2.0    # 도달하면 아예 안되는 구간
-
-        # ---- Runtime states ----
         self.terminated = False
         self.goal = False
         self.steps = 0
@@ -110,7 +106,6 @@ class SimpleMazeGrid(gym.Env):
 
         self.global_path = np.zeros((0, 2), dtype=np.float32)
         self.path_end_state = None
-
         self.reference_point = None
         self.closest_path_idx = None
         self.closest_path_point = None
@@ -120,8 +115,8 @@ class SimpleMazeGrid(gym.Env):
         self.eta = 0.0
 
         self.obstacles: List[Tuple[float, float, float]] = []
+        self.latest_layout_name = "none"
 
-        # ---- Reward config ----
         self.reward_cfg = {
             "w_smooth": 0.0,
             "w_obs": 0.75,
@@ -134,16 +129,13 @@ class SimpleMazeGrid(gym.Env):
             "clip_per_step": 1.0,
         }
 
-        # ---- Reset core ----
         if self.spec is not None:
             self._reset_core_spec(random_seed)
         else:
             self._reset_core(random_seed)
 
-        # ---- Observation space ----
         self._build_observation_space()
 
-        # ---- Render init ----
         if self.render_option:
             self._init_render()
 
@@ -173,8 +165,6 @@ class SimpleMazeGrid(gym.Env):
                 ),
             }
         )
-
-        # action: [-1,1] -> [-max_w, max_w]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
 
     # =========================
@@ -188,10 +178,24 @@ class SimpleMazeGrid(gym.Env):
             obs = self._reset_core(random_seed=seed)
         return obs, {}
 
+    def _reset_common(self, random_seed=None):
+        self.terminated = False
+        self.goal = False
+        self.steps = 0
+        self.cumulative_reward = 0.0
+        self.w = 0.0
+        self.visited_path = []
+        self.w_hist = [0.0] * self.hist_len
+        self.eta_hist = [0.0] * self.hist_len
+        self.time_table, self.v_table, self.w_table = [], [], []
+
+        if random_seed is not None:
+            random.seed(random_seed)
+            np.random.seed(random_seed)
+
     def _reset_core(self, random_seed=None):
         self._reset_common(random_seed)
 
-        # agent at center + random heading
         center_E = self.global_map_size // 2
         center_N = self.global_map_size // 2
         psi0 = random.uniform(-math.pi, math.pi)
@@ -199,33 +203,24 @@ class SimpleMazeGrid(gym.Env):
         self.initial_player_pos = np.array([center_E, center_N, psi0], dtype=np.float32)
         self.player_pos = self.initial_player_pos.copy()
 
-        # goal: radius away from center + random heading
-
         phi = random.uniform(-math.pi, math.pi)
-
         ge = float(center_E + self.radius * math.cos(phi))
         gn = float(center_N + self.radius * math.sin(phi))
         ge = float(np.clip(ge, 0.0, self.global_map_size - 1))
         gn = float(np.clip(gn, 0.0, self.global_map_size - 1))
         gpsi = random.uniform(-math.pi, math.pi)
-
         self.goal_pos = np.array([ge, gn, gpsi], dtype=np.float32)
 
         self._build_global_dubins_path()
         self.update_reference_point()
 
-        # obstacles
         self.obstacles = []
-        self.generate_obstacles(random_seed, midline_offset_ratio=0.01)
-
-        # local obs grid
+        self.generate_obstacles(random_seed=random_seed)
         self.obs_grid = self.compute_local_grids()
-
         return self.get_state()
 
     def _reset_core_spec(self, random_seed=None):
         self._reset_common(random_seed)
-
         initial_player_pos, goal_pos, obs_spec = self.spec
 
         self.initial_player_pos = np.array(initial_player_pos[0:3], dtype=np.float32)
@@ -235,7 +230,6 @@ class SimpleMazeGrid(gym.Env):
         self._build_global_dubins_path()
         self.update_reference_point()
 
-        # obstacles from spec or random
         self.obstacles = []
         if obs_spec is not None:
             obs_arr = np.array(obs_spec, dtype=float)
@@ -246,29 +240,12 @@ class SimpleMazeGrid(gym.Env):
             for i in range(obs_arr.shape[0]):
                 E, N, r = float(obs_arr[i, 0]), float(obs_arr[i, 1]), float(obs_arr[i, 2])
                 self.obstacles.append((E, N, r))
+            self.latest_layout_name = "spec"
         else:
-            self.generate_obstacles(random_seed, midline_offset_ratio=0.01)
+            self.generate_obstacles(random_seed=random_seed)
 
         self.obs_grid = self.compute_local_grids()
         return self.get_state()
-
-    def _reset_common(self, random_seed=None):
-        self.terminated = False
-        self.goal = False
-        self.steps = 0
-        self.cumulative_reward = 0.0
-        self.w = 0.0
-
-        self.visited_path = []
-
-        self.w_hist = [0.0] * self.hist_len
-        self.eta_hist = [0.0] * self.hist_len
-
-        self.time_table, self.v_table, self.w_table = [], [], []
-
-        if random_seed is not None:
-            random.seed(random_seed)
-            np.random.seed(random_seed)
 
     def retry(self):
         self.player_pos = self.initial_player_pos.copy()
@@ -277,13 +254,12 @@ class SimpleMazeGrid(gym.Env):
         self.cumulative_reward = 0.0
         self.steps = 0
         self.w = 0.0
-
         self.w_hist = [0.0] * self.hist_len
         self.eta_hist = [0.0] * self.hist_len
-
+        self.time_table, self.v_table, self.w_table = [], [], []
+        self.visited_path = []
         self.update_reference_point()
         self.obs_grid = self.compute_local_grids()
-
         return self.get_state(), {}
 
     # =========================
@@ -308,14 +284,11 @@ class SimpleMazeGrid(gym.Env):
 
     def _build_state(self):
         w_hist_vec = np.array(self.w_hist, dtype=np.float32)
-
         eta_pairs = []
         for e in self.eta_hist:
             eta_pairs.extend([math.cos(e), math.sin(e)])
         eta_hist_vec = np.array(eta_pairs, dtype=np.float32)
-
         obs_img = (self.obs_grid * 255).astype(np.uint8)[np.newaxis, :, :]
-
         return {
             "w_hist": w_hist_vec,
             "eta_hist": eta_hist_vec,
@@ -335,20 +308,15 @@ class SimpleMazeGrid(gym.Env):
         cfg = self.reward_cfg
         terminated = False
         truncated = False
-
-        old_pos = self.player_pos.copy()
         old_w = self.w
 
-        # pre-update (old state 기준)
         self.update_reference_point()
         self.obs_grid = self.compute_local_grids()
         self.path_tracking()
 
-        # action -> w
-        raw = float(action[0])  # [-1,1]
+        raw = float(action[0])
         self.w = float(np.clip(raw, -1.0, 1.0) * self.max_w)
 
-        # integrate
         new_pos = self.player_pos.copy()
         new_pos[2] = self.normalize_angle(new_pos[2] + self.w * self.dt)
         dE = self.v * math.cos(new_pos[2]) * self.dt
@@ -356,7 +324,6 @@ class SimpleMazeGrid(gym.Env):
         new_pos[0] = float(np.clip(new_pos[0] + dE, 0.0, self.global_map_size - 1))
         new_pos[1] = float(np.clip(new_pos[1] + dN, 0.0, self.global_map_size - 1))
 
-        # new state 기준 reference/eta 갱신
         self.player_pos = new_pos
         self.update_reference_point()
         self.obs_grid = self.compute_local_grids()
@@ -365,10 +332,8 @@ class SimpleMazeGrid(gym.Env):
         self._push_w(self.w)
         self._push_eta(self.eta)
 
-        # path lateral distance (body y)
         path_EN = np.asarray(self.global_path[:, :2], dtype=float)
         pos_xy = np.asarray(new_pos[:2], dtype=float)
-
         if path_EN.shape[0] >= 1:
             diffs = path_EN - pos_xy
             dists = np.hypot(diffs[:, 0], diffs[:, 1])
@@ -381,8 +346,7 @@ class SimpleMazeGrid(gym.Env):
         else:
             path_dist = 0.0
 
-        # reward parts
-        dw = (self.w - old_w)
+        dw = self.w - old_w
         w_range = max(2 * self.max_w, 1e-6)
         dw_n = dw / w_range
         smooth = float(dw_n ** 2)
@@ -391,23 +355,16 @@ class SimpleMazeGrid(gym.Env):
         pen = self.compute_obstacle_penalties(new_pos)
         p_new = np.clip((pen["clear"] + pen["hard"]) / 3.0, 0.0, 1.0)
         R_obs = -float(p_new)
-
         R_time = -5.0 * float(self.dt)
 
         if path_dist <= 0.1:
             path_dist = 0.0
-
-
-        R_track = float((0.1)**path_dist)
-        R_track = float(np.clip(R_track, -1.0, 1.0))
-        # print("1", R_track)
+        R_track = float(np.clip((0.1) ** path_dist, -1.0, 1.0))
 
         new_eta = abs(self.eta)
         if new_eta <= math.radians(1):
             new_eta = 0.0
-        R_eta = float((0.1)**new_eta)
-        R_eta = float(np.clip(R_eta, -1.0, 1.0))
-        # print("2", R_eta)
+        R_eta = float(np.clip((0.1) ** new_eta, -1.0, 1.0))
 
         reward = (
             cfg["w_smooth"] * R_smooth
@@ -416,18 +373,14 @@ class SimpleMazeGrid(gym.Env):
             + cfg["w_track"] * R_track
             + cfg["w_eta"] * R_eta
         )
-        # reward = float(np.clip(reward, -cfg["clip_per_step"], cfg["clip_per_step"]))
 
-        # termination
         if self.check_collision(new_pos[:2]):
             reward += cfg["penalty_collision"]
             terminated = True
 
         target_xy, target_psi = self._target_goal_state()
-
         cur_goal_dist = float(np.linalg.norm(new_pos[:2] - target_xy))
         heading_ok = math.cos(new_pos[2] - target_psi) >= math.cos(math.radians(30))
-
         if (cur_goal_dist < self.terminated_radius) and heading_ok:
             reward += cfg["bonus_goal"]
             self.goal = True
@@ -437,13 +390,11 @@ class SimpleMazeGrid(gym.Env):
             reward += cfg["penalty_timeout"]
             truncated = True
 
-        # logs
         self.cumulative_reward += reward
         self.steps += 1
         self.visited_path.append(self.player_pos.copy())
         self.time_table.append(self.steps * self.dt)
         self.w_table.append(self.w)
-
         self.terminated = terminated or truncated
 
         return self.get_state(), reward, terminated, truncated, {}
@@ -454,21 +405,182 @@ class SimpleMazeGrid(gym.Env):
         return self.goal_pos[:2], float(self.goal_pos[2])
 
     # =========================
-    # Obstacles
+    # Obstacle helpers
     # =========================
-    def generate_obstacles(
-            self,
-            random_seed=None,
-            max_attempts=5000,
-            ensure_midline=True,
-            midline_offset_ratio=0.2,
+    def _distance_point_to_segment(self, p, a, b):
+        p = np.asarray(p, dtype=float)
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        ab = b - a
+        denom = float(np.dot(ab, ab))
+        if denom <= 1e-12:
+            return float(np.linalg.norm(p - a))
+        t = float(np.clip(np.dot(p - a, ab) / denom, 0.0, 1.0))
+        proj = a + t * ab
+        return float(np.linalg.norm(p - proj))
+
+    def _min_distance_point_to_polyline(self, point_EN):
+        path_EN = np.asarray(self.global_path[:, :2], dtype=float)
+        if path_EN.shape[0] == 0:
+            return float("inf")
+        if path_EN.shape[0] == 1:
+            return float(np.linalg.norm(path_EN[0] - np.asarray(point_EN[:2], dtype=float)))
+        d_min = float("inf")
+        for i in range(path_EN.shape[0] - 1):
+            d = self._distance_point_to_segment(point_EN, path_EN[i], path_EN[i + 1])
+            if d < d_min:
+                d_min = d
+        return d_min
+
+    def min_surface_distance_to_obstacles(self, pos_EN):
+        E, N = float(pos_EN[0]), float(pos_EN[1])
+        if not self.obstacles:
+            return float("inf")
+        d_min = float("inf")
+        for (oE, oN, oR) in self.obstacles:
+            center_dist = math.hypot(E - oE, N - oN)
+            surface_dist = center_dist - (oR + self.agent_radius)
+            if surface_dist < d_min:
+                d_min = surface_dist
+        return d_min
+
+    def _can_place_obstacle(
+        self,
+        E: float,
+        N: float,
+        r: float,
+        start_EN,
+        end_EN,
+        keep_path_clear: bool = False,
+        path_clearance: float = 0.0,
     ):
-        """
-        - midline 장애물은 "start-goal_pos" 직선의 중간(=진짜 midline) 기준으로 배치
-        - 단, 회피 조건은 start + (완전 끝부분=path_end_state) 기준으로 hard-zone 밖을 보장
-        - 나머지 랜덤 장애물도 start + (완전 끝부분) 기준 hard-zone 밖 + 장애물끼리 hard-zone 겹침 방지
-        """
+        margin = r + self.safety_zone + 2.0
+        if E < margin or E > (self.global_map_size - margin):
+            return False
+        if N < margin or N > (self.global_map_size - margin):
+            return False
+
+        hard_buffer = r + self.hard_zone + self.agent_radius
+        if math.hypot(E - start_EN[0], N - start_EN[1]) <= hard_buffer:
+            return False
+        if math.hypot(E - end_EN[0], N - end_EN[1]) <= hard_buffer:
+            return False
+
+        for (oE, oN, oR) in self.obstacles:
+            min_center_sep = (r + self.hard_zone) + (oR + self.hard_zone) + 0.75
+            if math.hypot(E - oE, N - oN) <= min_center_sep:
+                return False
+
+        if keep_path_clear and self.global_path.shape[0] >= 2:
+            d_path = self._min_distance_point_to_polyline((E, N))
+            if d_path <= (r + self.hard_zone + path_clearance):
+                return False
+
+        return True
+
+    def _generate_corridor_pair_obstacles(self, max_attempts=5000):
+        if self.global_path.shape[0] < 10:
+            return False
+
+        path_EN = np.asarray(self.global_path[:, :2], dtype=float)
+        start_EN = np.asarray(self.initial_player_pos[:2], dtype=float)
+        if getattr(self, "path_end_state", None) is not None:
+            end_EN = np.asarray(self.path_end_state[:2], dtype=float)
+        else:
+            end_EN = np.asarray(self.goal_pos[:2], dtype=float)
+
+        n_pts = path_EN.shape[0]
+        idx_lo = max(5, int(0.30 * n_pts))
+        idx_hi = min(n_pts - 6, int(0.70 * n_pts))
+        if idx_hi <= idx_lo:
+            idx_lo = 1
+            idx_hi = n_pts - 2
+        if idx_hi <= idx_lo:
+            return False
+
+        for _ in range(max_attempts):
+            idx = random.randint(idx_lo, idx_hi)
+            p_prev = path_EN[max(0, idx - 3)]
+            p_cur = path_EN[idx]
+            p_next = path_EN[min(n_pts - 1, idx + 3)]
+
+            tangent = p_next - p_prev
+            tangent_norm = float(np.linalg.norm(tangent))
+            if tangent_norm <= 1e-9:
+                continue
+            tangent /= tangent_norm
+            normal = np.array([-tangent[1], tangent[0]], dtype=float)
+
+            r1 = random.uniform(self.obstacle_min_r, self.obstacle_max_r)
+            r2 = random.uniform(self.obstacle_min_r, self.obstacle_max_r)
+            corridor_half_width = random.uniform(
+                self.corridor_half_width,
+                self.corridor_half_width + 1.5,
+            )
+            tangent_jitter = random.uniform(-0.15 * self.sensor_range, 0.15 * self.sensor_range)
+            anchor = p_cur + tangent * tangent_jitter
+
+            offset1 = r1 + self.hard_zone + corridor_half_width
+            offset2 = r2 + self.hard_zone + corridor_half_width
+            c1 = anchor + normal * offset1
+            c2 = anchor - normal * offset2
+
+            if not self._can_place_obstacle(
+                c1[0], c1[1], r1, start_EN, end_EN,
+                keep_path_clear=True,
+                path_clearance=corridor_half_width,
+            ):
+                continue
+            if not self._can_place_obstacle(
+                c2[0], c2[1], r2, start_EN, end_EN,
+                keep_path_clear=True,
+                path_clearance=corridor_half_width,
+            ):
+                continue
+
+            hard_sep = np.linalg.norm(c1 - c2) - ((r1 + self.hard_zone) + (r2 + self.hard_zone))
+            if hard_sep <= 2.0 * corridor_half_width - 1e-6:
+                continue
+
+            self.obstacles.append((float(c1[0]), float(c1[1]), float(r1)))
+            self.obstacles.append((float(c2[0]), float(c2[1]), float(r2)))
+            self.latest_layout_name = "corridor_pair"
+            return True
+
+        return False
+
+    def _generate_remaining_random_obstacles(self, remaining_count: int, max_attempts=5000, keep_path_clear=False):
+        if remaining_count <= 0:
+            return
+
+        start_EN = np.asarray(self.initial_player_pos[:2], dtype=float)
+        if getattr(self, "path_end_state", None) is not None:
+            end_EN = np.asarray(self.path_end_state[:2], dtype=float)
+        else:
+            end_EN = np.asarray(self.goal_pos[:2], dtype=float)
+
+        for _ in range(remaining_count):
+            placed = False
+            for _ in range(max_attempts):
+                r = random.uniform(self.obstacle_min_r, self.obstacle_max_r)
+                margin = r + self.safety_zone + 2.0
+                E = random.uniform(margin, self.global_map_size - margin)
+                N = random.uniform(margin, self.global_map_size - margin)
+                if not self._can_place_obstacle(
+                    E, N, r, start_EN, end_EN,
+                    keep_path_clear=keep_path_clear,
+                    path_clearance=self.random_path_clearance,
+                ):
+                    continue
+                self.obstacles.append((float(E), float(N), float(r)))
+                placed = True
+                break
+            if not placed:
+                break
+
+    def generate_obstacles(self, random_seed=None, max_attempts=5000):
         self.obstacles = []
+        self.latest_layout_name = "none"
         if self.obstacle_count <= 0:
             return
 
@@ -476,128 +588,66 @@ class SimpleMazeGrid(gym.Env):
             random.seed(random_seed)
             np.random.seed(random_seed)
 
-        # start
-        E0, N0 = float(self.initial_player_pos[0]), float(self.initial_player_pos[1])
+        layout = self.obstacle_layout.lower().strip()
+        if layout == "auto":
+            layout = "corridor_pair" if self.obstacle_count >= 2 else "midline"
 
-        # midline 기준: goal_pos (연장 끝 아님)
-        Eg_mid, Ng_mid = float(self.goal_pos[0]), float(self.goal_pos[1])
+        if layout in {"corridor_pair", "two_between", "pair_gap"} and self.obstacle_count >= 2:
+            ok = self._generate_corridor_pair_obstacles(max_attempts=max_attempts)
+            if ok:
+                self._generate_remaining_random_obstacles(
+                    self.obstacle_count - 2,
+                    max_attempts=max_attempts,
+                    keep_path_clear=True,
+                )
+                return
 
-        # 회피(끝부분) 기준: path_end_state (있으면), 없으면 goal_pos
+        # fallback: single midline obstacle or random layout
+        start_EN = np.asarray(self.initial_player_pos[:2], dtype=float)
         if getattr(self, "path_end_state", None) is not None:
-            Eg_end, Ng_end = float(self.path_end_state[0]), float(self.path_end_state[1])
+            end_EN = np.asarray(self.path_end_state[:2], dtype=float)
         else:
-            Eg_end, Ng_end = Eg_mid, Ng_mid
+            end_EN = np.asarray(self.goal_pos[:2], dtype=float)
 
-        # (장애물 반경 + hard_zone) 안에 에이전트 반경까지 포함해서 못 들어오게
-        def min_sep_with_hardzone(r_obs: float) -> float:
-            return float(r_obs + self.hard_zone + self.agent_radius)
-
-        # ---------------------------------------------------------------------
-        # 1) midline obstacle (optional)  : start-goal_pos midline 기준으로 배치
-        #    단, start & end(연장끝) 모두 hard-zone 밖이면 accept
-        # ---------------------------------------------------------------------
-        if ensure_midline:
-            d_mid = math.hypot(Eg_mid - E0, Ng_mid - N0)
-            if d_mid > 1e-6:
-                placed_mid = False
-                for _ in range(max_attempts):
-                    r0 = random.uniform(self.obstacle_min_r, self.obstacle_max_r)
-
-                    # start-goal_pos 중간점
-                    mE = 0.5 * (E0 + Eg_mid)
-                    mN = 0.5 * (N0 + Ng_mid)
-
-                    # start->goal_pos 수직 방향 단위벡터
-                    dE = Eg_mid - E0
-                    dN = Ng_mid - N0
-                    nE, nN = -dN, dE
-                    norm = math.hypot(nE, nN)
-                    if norm > 1e-9:
-                        nE /= norm
-                        nN /= norm
-                    else:
-                        nE, nN = 0.0, 1.0
-
-                    max_offset = midline_offset_ratio * d_mid
-                    max_offset = float(
-                        np.clip(
-                            max_offset,
-                            0.0,
-                            0.4 * min(self.global_map_size, self.sensor_range * 2),
-                        )
-                    )
-                    offset = random.uniform(-max_offset, max_offset)
-
-                    # midline 후보점(경계 clip)
-                    margin0 = r0 + 1.0
-                    mE_off = float(np.clip(mE + offset * nE, margin0, self.global_map_size - margin0))
-                    mN_off = float(np.clip(mN + offset * nN, margin0, self.global_map_size - margin0))
-
-                    # start/end(연장끝)와의 거리 제한으로 r0 캡
-                    dist_start = math.hypot(mE_off - E0, mN_off - N0)
-                    dist_end = math.hypot(mE_off - Eg_end, mN_off - Ng_end)
-
-                    buffer = self.hard_zone + self.agent_radius + 0.5  # 여유(원하면 0으로)
-                    r_cap = max(0.2, min(dist_start, dist_end) - buffer)
-                    r0_cap = float(np.clip(r0, self.obstacle_min_r, min(self.obstacle_max_r, r_cap)))
-
-                    if r0_cap <= 0.0:
-                        continue
-
-                    # 최종 check: start/end 둘 다 hard-zone 밖
-                    if dist_start < min_sep_with_hardzone(r0_cap):
-                        continue
-                    if dist_end < min_sep_with_hardzone(r0_cap):
-                        continue
-
-                    self.obstacles.append((mE_off, mN_off, r0_cap))
-                    placed_mid = True
+        path_EN = np.asarray(self.global_path[:, :2], dtype=float)
+        if layout in {"midline", "single_midline"} and self.obstacle_count >= 1 and path_EN.shape[0] >= 2:
+            for _ in range(max_attempts):
+                idx = random.randint(max(1, int(0.35 * len(path_EN))), max(1, int(0.65 * len(path_EN))))
+                p_prev = path_EN[max(0, idx - 3)]
+                p_cur = path_EN[idx]
+                p_next = path_EN[min(len(path_EN) - 1, idx + 3)]
+                tangent = p_next - p_prev
+                tangent_norm = float(np.linalg.norm(tangent))
+                if tangent_norm <= 1e-9:
+                    continue
+                tangent /= tangent_norm
+                normal = np.array([-tangent[1], tangent[0]], dtype=float)
+                r = random.uniform(self.obstacle_min_r, self.obstacle_max_r)
+                offset = random.uniform(-0.1 * self.sensor_range, 0.1 * self.sensor_range)
+                side = random.choice([-1.0, 1.0])
+                lateral = r + self.hard_zone + self.corridor_half_width
+                center = p_cur + tangent * offset + side * normal * lateral
+                if self._can_place_obstacle(
+                    center[0], center[1], r, start_EN, end_EN,
+                    keep_path_clear=True,
+                    path_clearance=self.corridor_half_width,
+                ):
+                    self.obstacles.append((float(center[0]), float(center[1]), float(r)))
+                    self.latest_layout_name = "midline"
                     break
 
-                # midline을 반드시 넣고 싶으면 placed_mid가 False일 때 예외/경고 처리 가능
-                # if not placed_mid:
-                #     print("[generate_obstacles] midline obstacle placement failed")
-
-        # ---------------------------------------------------------------------
-        # 2) remaining random obstacles
-        #    start + end(연장끝) 기준 hard-zone 밖, 장애물끼리 hard-zone 겹침 방지
-        # ---------------------------------------------------------------------
-        remaining = max(0, self.obstacle_count - len(self.obstacles))
-        margin_rand = self.obstacle_max_r + 1.0
-
-        for _ in range(remaining):
-            placed = False
-            for _ in range(max_attempts):
-                r = random.uniform(self.obstacle_min_r, self.obstacle_max_r)
-                E = random.uniform(margin_rand, self.global_map_size - margin_rand)
-                N = random.uniform(margin_rand, self.global_map_size - margin_rand)
-
-                # start / end(연장끝)과 hard-zone 바깥
-                if math.hypot(E - E0, N - N0) < min_sep_with_hardzone(r):
-                    continue
-                if math.hypot(E - Eg_end, N - Ng_end) < min_sep_with_hardzone(r):
-                    continue
-
-                # 장애물끼리 hard-zone 기준 겹침 방지
-                if any(
-                        math.hypot(E - oE, N - oN) < ((r + self.hard_zone) + (oR + self.hard_zone) + 1.0)
-                        for (oE, oN, oR) in self.obstacles
-                ):
-                    continue
-
-                self.obstacles.append((E, N, r))
-                placed = True
-                break
-
-            if not placed:
-                break
+        remaining = self.obstacle_count - len(self.obstacles)
+        if remaining > 0:
+            self._generate_remaining_random_obstacles(
+                remaining,
+                max_attempts=max_attempts,
+                keep_path_clear=(layout in {"midline", "single_midline"}),
+            )
+            if self.latest_layout_name == "none":
+                self.latest_layout_name = "random"
 
     def check_collision(self, pos_EN):
-        E, N = float(pos_EN[0]), float(pos_EN[1])
-        for (oE, oN, oR) in self.obstacles:
-            if math.hypot(E - oE, N - oN) <= (oR + self.agent_radius):
-                return True
-        return False
+        return self.min_surface_distance_to_obstacles(pos_EN) <= 0.0
 
     # =========================
     # LIDAR
@@ -636,11 +686,9 @@ class SimpleMazeGrid(gym.Env):
         hits = []
         start_ang = -0.5 * self.lidar_fov
         d_ang = self.lidar_fov / float(self.lidar_num_rays)
-
         for i in range(self.lidar_num_rays):
             ang = start_ang + i * d_ang
             c, s = math.cos(ang), math.sin(ang)
-
             nearest_t = None
             for (cx, cy, r) in circles_b:
                 t = self._ray_circle_first_hit_t(cx, cy, r, c, s)
@@ -651,7 +699,6 @@ class SimpleMazeGrid(gym.Env):
                 if t <= self.lidar_max_range:
                     if nearest_t is None or t < nearest_t:
                         nearest_t = t
-
             if nearest_t is not None:
                 xb_hit = nearest_t * c
                 yb_hit = nearest_t * s
@@ -671,9 +718,6 @@ class SimpleMazeGrid(gym.Env):
         return (dx * dx + dy * dy) <= (r * r + 1e-12)
 
     def compute_local_grids(self):
-        """
-        obstacle grid만 반환 (L,L) float32 {0,1}
-        """
         L = self.local_map_size
         S = self.sensor_range
         obs_grid = np.zeros((L, L), dtype=np.float32)
@@ -692,7 +736,6 @@ class SimpleMazeGrid(gym.Env):
             xb_o, yb_o = self.world_to_body((oE, oN))
             if (xb_o < -S - oR) or (xb_o > S + oR) or (yb_o < -S - oR) or (yb_o > S + oR):
                 continue
-
             for rr in range(L):
                 xmin = x_bottoms[rr]
                 xmax = x_tops[rr]
@@ -705,18 +748,15 @@ class SimpleMazeGrid(gym.Env):
                         continue
                     if self._rect_circle_intersects(xmin, xmax, ymin, ymax, xb_o, yb_o, oR):
                         obs_grid[rr, cc] = 1.0
-
         return obs_grid
 
     def _obs_grid_from_lidar_hits(self, hits_body):
         L = self.local_map_size
         S = self.sensor_range
         cell_world = (2.0 * S) / L
-
         obs_grid = np.zeros((L, L), dtype=np.float32)
         if hits_body.shape[0] == 0:
             return obs_grid
-
         for xb, yb in hits_body:
             r_float = (S - xb) / cell_world
             c_float = (yb + S) / cell_world
@@ -732,10 +772,8 @@ class SimpleMazeGrid(gym.Env):
         if agent_ENpsi is None:
             agent_ENpsi = self.player_pos
         E_a, N_a, psi = float(agent_ENpsi[0]), float(agent_ENpsi[1]), float(agent_ENpsi[2])
-
         dE = float(point_EN[0]) - E_a
         dN = float(point_EN[1]) - N_a
-
         x_b = dE * math.cos(psi) + dN * math.sin(psi)
         y_b = dE * math.sin(psi) - dN * math.cos(psi)
         return x_b, y_b
@@ -744,20 +782,14 @@ class SimpleMazeGrid(gym.Env):
         if agent_ENpsi is None:
             agent_ENpsi = self.player_pos
         E0, N0, psi = float(agent_ENpsi[0]), float(agent_ENpsi[1]), float(agent_ENpsi[2])
-
         dE = xb * math.cos(psi) + yb * math.sin(psi)
         dN = xb * math.sin(psi) - yb * math.cos(psi)
         return E0 + dE, N0 + dN
 
     # =========================
-    # Dubins path & reference
+    # Dubins / reference
     # =========================
     def _build_global_dubins_path(self):
-        """
-        initial -> goal Dubins 경로 + 직선 연장.
-        self.global_path: (N,2)
-        self.path_end_state: (E,N,psi_end)
-        """
         try:
             path_x, path_y, path_yaw, modes, lengths = self.path_planner.plan(
                 self.initial_player_pos[0],
@@ -772,21 +804,17 @@ class SimpleMazeGrid(gym.Env):
             path_y = list(path_y)
             path_yaw = list(path_yaw)
 
-            # extend straight segment
             if len(path_x) > 0:
                 last_x = path_x[-1]
                 last_y = path_y[-1]
                 last_yaw = path_yaw[-1]
-
                 step_size = 0.1
                 num_points = int(self.extension_len / step_size)
-
                 for i in range(1, num_points + 1):
                     dist = i * step_size
                     path_x.append(last_x + dist * math.cos(last_yaw))
                     path_y.append(last_y + dist * math.sin(last_yaw))
 
-            # end state
             if len(path_x) >= 2:
                 last_x, last_y = path_x[-1], path_y[-1]
                 prev_x, prev_y = path_x[-2], path_y[-2]
@@ -796,7 +824,6 @@ class SimpleMazeGrid(gym.Env):
                 self.path_end_state = None
 
             self.global_path = np.stack([path_x, path_y], axis=1).astype(np.float32)
-
         except Exception as e:
             print("[Dubins] path planning failed:", e)
             self.global_path = np.zeros((0, 2), dtype=np.float32)
@@ -805,7 +832,6 @@ class SimpleMazeGrid(gym.Env):
     def compute_reference_point_on_global(self, L=None):
         if L is None:
             L = self.reference_L
-
         if self.global_path is None or self.global_path.shape[0] < 2:
             self.closest_path_idx = None
             self.closest_path_point = None
@@ -813,10 +839,8 @@ class SimpleMazeGrid(gym.Env):
 
         path_EN = np.asarray(self.global_path[:, :2], dtype=float)
         agent = np.array(self.player_pos[:2], dtype=float)
-
         diffs = path_EN - agent
         dists = np.hypot(diffs[:, 0], diffs[:, 1])
-
         cur_idx = int(np.argmin(dists))
         self.closest_path_idx = cur_idx
         self.closest_path_point = path_EN[cur_idx].copy()
@@ -824,12 +848,10 @@ class SimpleMazeGrid(gym.Env):
         if L <= 0.0:
             return self.closest_path_point.copy()
 
-        # remaining length
         remaining_len = 0.0
         for i in range(cur_idx, len(path_EN) - 1):
             p0, p1 = path_EN[i], path_EN[i + 1]
             remaining_len += float(math.hypot(p1[0] - p0[0], p1[1] - p0[1]))
-
         if remaining_len <= L:
             return path_EN[-1].copy()
 
@@ -840,26 +862,14 @@ class SimpleMazeGrid(gym.Env):
             acc += seg_len
             if acc >= L:
                 return p1.copy()
-
         return path_EN[-1].copy()
 
     def update_reference_point(self):
         self.reference_point = self.compute_reference_point_on_global(L=self.reference_L)
 
-    # =========================
-    # Path tracking (LOS)
-    # =========================
     def path_tracking(self):
-        """
-        LOS 기반 heading error eta:
-        eta = atan2(ref-pos) - psi
-
-        a_cmd = 2 * V^2/L * sin(eta)
-        w_cmd = a_cmd / V
-        """
         V = float(self.v)
         L = float(self.reference_L)
-
         if V <= 1e-6 or L <= 1e-6 or self.reference_point is None:
             self.eta = 0.0
             self.a_cmd = 0.0
@@ -868,7 +878,6 @@ class SimpleMazeGrid(gym.Env):
 
         pos = np.array(self.player_pos[:2], dtype=float)
         ref = np.array(self.reference_point[:2], dtype=float)
-
         dEN = ref - pos
         R = float(np.linalg.norm(dEN))
         if R < 1e-6:
@@ -879,28 +888,21 @@ class SimpleMazeGrid(gym.Env):
 
         chi_ref = math.atan2(dEN[1], dEN[0])
         psi = float(self.player_pos[2])
-
         eta = self.normalize_angle(chi_ref - psi)
         a_cmd = 2.0 * (V * V / L) * math.sin(eta)
         w_cmd = a_cmd / V
-
         self.eta = eta
         self.a_cmd = a_cmd
         self.w_cmd = w_cmd
 
     # =========================
-    # Obstacle penalties
+    # Reward / penalties
     # =========================
     def obstacle_cell_distances_at(self, agent_ENpsi):
-        """
-        (LIDAR OFF일 때 기준) 로컬 그리드에 채워지는 obstacle 셀 중심까지 거리
-        """
         L = self.local_map_size
         S = self.sensor_range
         cell_world = (2.0 * S) / L
-
         obs_grid = np.zeros((L, L), dtype=np.float32)
-
         x_tops = S - np.arange(0, L) * cell_world
         x_bottoms = x_tops - cell_world
         y_lefts = -S + np.arange(0, L) * cell_world
@@ -930,33 +932,21 @@ class SimpleMazeGrid(gym.Env):
         xb_centers = 0.5 * (x_tops[rr] + x_bottoms[rr])
         yb_centers = 0.5 * (y_rights[cc] + y_lefts[cc])
         centers_body = np.vstack([xb_centers, yb_centers]).T
-
         distances = np.hypot(xb_centers, yb_centers)
         order = np.argsort(distances)
-
         distances = distances[order]
         centers_body = centers_body[order]
         rc_indices = [(int(rr[i]), int(cc[i])) for i in order]
         return distances, rc_indices, centers_body
 
     def compute_obstacle_penalties(self, new_pos):
-        """
-        clear: 최소 안전거리 위반 정도 [0,1]
-        hard : hard-zone 안이면 2.0 아니면 0.0 (원 코드 유지)
-        """
-        # LIDAR ON이면 obstacle_cell_distances_at이 "grid 기반"이라 의미가 애매하지만,
-        # 원 코드 흐름 유지(여기서는 여전히 grid 기반으로 페널티 산출).
-        dists, _, _ = self.obstacle_cell_distances_at(new_pos)
-        if dists.size == 0:
+        d_surface = self.min_surface_distance_to_obstacles(new_pos)
+        if not np.isfinite(d_surface):
             return {"clear": 0.0, "hard": 0.0}
 
         eps = 1e-6
-        d_min = float(np.min(dists))
-
-        d_safe = float(self.agent_radius + self.safety_zone)
-        clear = float(np.clip(1.0 - d_min / max(d_safe, eps), 0.0, 1.0))
-
-        hard = 2.0 if d_min < float(self.hard_zone) else 0.0
+        clear = float(np.clip(1.0 - d_surface / max(self.safety_zone, eps), 0.0, 1.0))
+        hard = 2.0 if d_surface < float(self.hard_zone) else 0.0
         return {"clear": clear, "hard": hard}
 
     # =========================
@@ -965,59 +955,58 @@ class SimpleMazeGrid(gym.Env):
     def _init_render(self):
         pygame.init()
 
-        self.global_screen_width = 1000
-        self.global_screen_height = 1000
-        self.info_width = 220
-        self.local_screen_width = 500
-        self.local_screen_height = 500
-
+        self.global_screen_width = 1100
+        self.global_screen_height = 1100
+        self.info_width = 280
+        self.local_screen_width = 620
+        self.local_screen_height = 620
         self.total_width = self.global_screen_width + self.info_width + self.local_screen_width
         self.total_height = self.global_screen_height
 
         self.screen = pygame.display.set_mode((self.total_width, self.total_height))
-        pygame.display.set_caption("(E-N World + Info + Body-Frame)")
+        pygame.display.set_caption("Paper-ready Maze Viewer")
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.Font(None, 36)
-        self.small_font = pygame.font.Font(None, 20)
+        self.font = pygame.font.Font(None, 48)
+        self.medium_font = pygame.font.Font(None, 30)
+        self.small_font = pygame.font.Font(None, 24)
 
         self.rect_global = pygame.Rect(0, 0, self.global_screen_width, self.global_screen_height)
         self.rect_info = pygame.Rect(self.global_screen_width, 0, self.info_width, self.global_screen_height)
-        self.rect_local = pygame.Rect(
-            self.global_screen_width + self.info_width, 0, self.local_screen_width, self.local_screen_height
-        )
+        self.rect_local = pygame.Rect(self.global_screen_width + self.info_width, 0, self.local_screen_width, self.local_screen_height)
 
-        # colors (사용되는 것만)
-        self.COLOR_BG = (255, 255, 255)
-        self.COLOR_GLOBAL = (230, 230, 230)
-        self.COLOR_INFO = (245, 245, 245)
-        self.COLOR_LOCAL = (230, 230, 255)
-        self.COLOR_GRID = (210, 210, 240)
+        self.COLOR_BG = (250, 251, 253)
+        self.COLOR_GLOBAL = (245, 246, 248)
+        self.COLOR_INFO = (255, 255, 255)
+        self.COLOR_LOCAL = (245, 247, 250)
+        self.COLOR_GRID = (222, 228, 236)
 
-        self.COLOR_AGENT = (0, 0, 255)
-        self.COLOR_GOAL = (0, 200, 0)
-        self.COLOR_PATH = (150, 0, 150)
-        self.COLOR_ARROW = (0, 0, 0)
-        self.COLOR_GOAL_ARROW = (255, 0, 0)
-
-        self.COLOR_OBS_FILL = (90, 90, 90)
-        self.COLOR_OBS_EDGE = (0, 0, 0)
-        self.COLOR_OBS_CELL = (110, 110, 110)
-        self.COLOR_HARD_ZONE = (255, 0, 0)
-
-        self.COLOR_DUBINS = (0, 200, 200)
-        self.COLOR_REF_POINT = (200, 0, 200)
-        self.COLOR_LOCAL_BOX = (0, 255, 0)
-
-        self.COLOR_CLOSEST = (255, 0, 0)  # closest path point
+        self.COLOR_AGENT = (31, 78, 255)
+        self.COLOR_START = (31, 78, 255)
+        self.COLOR_GOAL = (0, 160, 90)
+        self.COLOR_PATH = (166, 33, 185)
+        self.COLOR_DUBINS = (0, 170, 190)
+        self.COLOR_REF_POINT = (180, 0, 180)
+        self.COLOR_ARROW = (30, 30, 30)
+        self.COLOR_GOAL_ARROW = (0, 120, 70)
+        self.COLOR_OBS_FILL = (90, 96, 110)
+        self.COLOR_OBS_EDGE = (45, 45, 55)
+        self.COLOR_HARD_ZONE = (225, 40, 45)
+        self.COLOR_HARD_FILL = (225, 40, 45, 45)
+        self.COLOR_SAFE_ZONE = (245, 140, 40)
+        self.COLOR_SAFE_FILL = (245, 140, 40, 24)
+        self.COLOR_LOCAL_BOX = (20, 155, 90)
+        self.COLOR_CLOSEST = (255, 80, 80)
+        self.COLOR_TEXT = (20, 22, 28)
+        self.COLOR_SUBTEXT = (70, 76, 88)
 
     def world_to_screen(self, e, n, target_rect, cell_size=None):
         if cell_size is None:
             cell_size = target_rect.width / self.global_map_size
         sx = target_rect.x + e * cell_size + cell_size / 2.0
         sy = target_rect.y + target_rect.height - (n * cell_size + cell_size / 2.0)
-        return int(sx), int(sy)
+        return int(round(sx)), int(round(sy))
 
-    def draw_arrow(self, start_xy, end_xy, color, width=3, head_len=10, head_angle=math.pi / 6):
+    def draw_arrow(self, start_xy, end_xy, color, width=3, head_len=12, head_angle=math.pi / 6):
         sx, sy = start_xy
         ex, ey = end_xy
         pygame.draw.line(self.screen, color, (sx, sy), (ex, ey), width)
@@ -1036,22 +1025,96 @@ class SimpleMazeGrid(gym.Env):
         pygame.draw.line(self.screen, color, (cx - half, cy - half), (cx + half, cy + half), width)
         pygame.draw.line(self.screen, color, (cx - half, cy + half), (cx + half, cy - half), width)
 
+    def _draw_legend(self, cell_size):
+        legend_x = self.rect_global.x + 20
+        legend_y = self.rect_global.y + 20
+        line_gap = 26
+        entries = [
+            (self.COLOR_DUBINS, "Planned path"),
+            (self.COLOR_PATH, "Executed trajectory"),
+            (self.COLOR_HARD_ZONE, "Hard zone"),
+            (self.COLOR_SAFE_ZONE, "Safety zone"),
+        ]
+        panel = pygame.Rect(legend_x - 12, legend_y - 10, 250, 120)
+        pygame.draw.rect(self.screen, (255, 255, 255), panel, border_radius=10)
+        pygame.draw.rect(self.screen, (210, 214, 220), panel, width=1, border_radius=10)
+        for i, (color, label) in enumerate(entries):
+            y = legend_y + i * line_gap
+            pygame.draw.line(self.screen, color, (legend_x, y), (legend_x + 34, y), 4)
+            text = self.small_font.render(label, True, self.COLOR_TEXT)
+            self.screen.blit(text, (legend_x + 46, y - 10))
+
     def draw_obstacles_on_global(self, cell_size):
+        overlay = pygame.Surface((self.rect_global.width, self.rect_global.height), pygame.SRCALPHA)
         for (oE, oN, oR) in self.obstacles:
             sx, sy = self.world_to_screen(oE, oN, self.rect_global, cell_size)
+            lx = sx - self.rect_global.x
+            ly = sy - self.rect_global.y
 
-            pr_obs = max(1, int(oR * cell_size))
-            pygame.draw.circle(self.screen, self.COLOR_OBS_FILL, (sx, sy), pr_obs, 0)
-            pygame.draw.circle(self.screen, self.COLOR_OBS_EDGE, (sx, sy), pr_obs, 2)
+            safe_px = max(1, int(round((oR + self.safety_zone) * cell_size)))
+            hard_px = max(1, int(round((oR + self.hard_zone) * cell_size)))
+            obs_px = max(2, int(round(oR * cell_size)))
 
-            hard_r = oR + self.hard_zone
-            hard_px = max(1, int(hard_r * cell_size))
-            pygame.draw.circle(self.screen, self.COLOR_HARD_ZONE, (sx, sy), hard_px, 2)
+            if self.show_safety_ring:
+                pygame.draw.circle(overlay, self.COLOR_SAFE_FILL, (lx, ly), safe_px, 0)
+                pygame.draw.circle(overlay, self.COLOR_SAFE_ZONE, (lx, ly), safe_px, 2)
+
+            pygame.draw.circle(overlay, self.COLOR_HARD_FILL, (lx, ly), hard_px, 0)
+            pygame.draw.circle(overlay, self.COLOR_HARD_ZONE, (lx, ly), hard_px, 4)
+
+            pygame.draw.circle(self.screen, self.COLOR_OBS_FILL, (sx, sy), obs_px, 0)
+            pygame.draw.circle(self.screen, self.COLOR_OBS_EDGE, (sx, sy), obs_px, 2)
+
+        self.screen.blit(overlay, self.rect_global.topleft)
 
     def draw_local_range_on_global(self, cell_size):
         px, py = self.world_to_screen(self.player_pos[0], self.player_pos[1], self.rect_global, cell_size)
-        radius_px = max(1, int(self.sensor_range * cell_size))
+        radius_px = max(1, int(round(self.sensor_range * cell_size)))
         pygame.draw.circle(self.screen, self.COLOR_LOCAL_BOX, (px, py), radius_px, 3)
+
+    def _body_frame_curve_pixels(self):
+        if self.global_path is None or self.global_path.shape[0] < 2:
+            return []
+        pts = []
+        S = float(self.sensor_range)
+        cx = self.rect_local.x + self.rect_local.width / 2.0
+        cy = self.rect_local.y + self.rect_local.height / 2.0
+        for p in self.global_path:
+            xb, yb = self.world_to_body((float(p[0]), float(p[1])), agent_ENpsi=self.player_pos)
+            if abs(xb) > S or abs(yb) > S:
+                continue
+            sx = cx + (yb / S) * (self.rect_local.width / 2.0)
+            sy = cy - (xb / S) * (self.rect_local.height / 2.0)
+            pts.append((int(round(sx)), int(round(sy))))
+        return pts
+
+    def _draw_local_obstacles(self):
+        overlay = pygame.Surface((self.rect_local.width, self.rect_local.height), pygame.SRCALPHA)
+        cx = self.rect_local.width / 2.0
+        cy = self.rect_local.height / 2.0
+        S = float(self.sensor_range)
+        scale = (self.rect_local.width / 2.0) / S
+
+        for (oE, oN, oR) in self.obstacles:
+            xb, yb = self.world_to_body((oE, oN), agent_ENpsi=self.player_pos)
+            if abs(xb) > (S + oR + self.safety_zone) or abs(yb) > (S + oR + self.safety_zone):
+                continue
+
+            x_px = cx + yb * scale
+            y_px = cy - xb * scale
+            obs_px = max(2, int(round(oR * scale)))
+            hard_px = max(2, int(round((oR + self.hard_zone) * scale)))
+            safe_px = max(2, int(round((oR + self.safety_zone) * scale)))
+
+            if self.show_safety_ring:
+                pygame.draw.circle(overlay, self.COLOR_SAFE_FILL, (int(round(x_px)), int(round(y_px))), safe_px, 0)
+                pygame.draw.circle(overlay, self.COLOR_SAFE_ZONE, (int(round(x_px)), int(round(y_px))), safe_px, 2)
+            pygame.draw.circle(overlay, self.COLOR_HARD_FILL, (int(round(x_px)), int(round(y_px))), hard_px, 0)
+            pygame.draw.circle(overlay, self.COLOR_HARD_ZONE, (int(round(x_px)), int(round(y_px))), hard_px, 3)
+            pygame.draw.circle(self.screen, self.COLOR_OBS_FILL, (int(round(self.rect_local.x + x_px)), int(round(self.rect_local.y + y_px))), obs_px, 0)
+            pygame.draw.circle(self.screen, self.COLOR_OBS_EDGE, (int(round(self.rect_local.x + x_px)), int(round(self.rect_local.y + y_px))), obs_px, 2)
+
+        self.screen.blit(overlay, self.rect_local.topleft)
 
     def render(self, fps=30):
         if not self.render_option:
@@ -1061,54 +1124,58 @@ class SimpleMazeGrid(gym.Env):
         pygame.draw.rect(self.screen, self.COLOR_GLOBAL, self.rect_global)
         pygame.draw.rect(self.screen, self.COLOR_INFO, self.rect_info)
         pygame.draw.rect(self.screen, self.COLOR_LOCAL, self.rect_local)
+        pygame.draw.rect(self.screen, (220, 224, 231), self.rect_info, width=1)
+        pygame.draw.rect(self.screen, (220, 224, 231), self.rect_local, width=1)
 
         cell_size = self.rect_global.width / self.global_map_size
         e, n = float(self.player_pos[0]), float(self.player_pos[1])
         ge, gn = float(self.goal_pos[0]), float(self.goal_pos[1])
+        se, sn = float(self.initial_player_pos[0]), float(self.initial_player_pos[1])
 
-        # obstacles
         self.draw_obstacles_on_global(cell_size)
+
+        # planned path
+        if isinstance(self.global_path, np.ndarray) and self.global_path.shape[0] >= 2:
+            dubins_pts = [self.world_to_screen(float(p[0]), float(p[1]), self.rect_global, cell_size) for p in self.global_path]
+            pygame.draw.lines(self.screen, self.COLOR_DUBINS, False, dubins_pts, 5)
+
+        # executed path
+        if len(self.visited_path) >= 2:
+            pts = [self.world_to_screen(p[0], p[1], self.rect_global, cell_size) for p in self.visited_path]
+            pygame.draw.lines(self.screen, self.COLOR_PATH, False, pts, 4)
+
+        # start
+        sx, sy = self.world_to_screen(se, sn, self.rect_global, cell_size)
+        pygame.draw.circle(self.screen, self.COLOR_START, (sx, sy), 8)
 
         # goal
         gx, gy = self.world_to_screen(ge, gn, self.rect_global, cell_size)
-        pygame.draw.circle(self.screen, self.COLOR_GOAL, (gx, gy), int(cell_size / 3))
+        pygame.draw.circle(self.screen, self.COLOR_GOAL, (gx, gy), 9)
         dE_g, dN_g = self.dir_from_heading(self.goal_pos[2])
         self.draw_arrow(
             (gx, gy),
-            (int(gx + 1.5 * cell_size * dE_g), int(gy - 1.5 * cell_size * dN_g)),
+            (int(gx + 24 * dE_g), int(gy - 24 * dN_g)),
             self.COLOR_GOAL_ARROW,
-            width=3,
-            head_len=10,
+            width=4,
+            head_len=12,
         )
-
-        # dubins path
-        if isinstance(self.global_path, np.ndarray) and self.global_path.shape[0] >= 2:
-            dubins_pts = [self.world_to_screen(float(p[0]), float(p[1]), self.rect_global, cell_size) for p in self.global_path]
-            pygame.draw.lines(self.screen, self.COLOR_DUBINS, False, dubins_pts, 2)
 
         # agent
         px, py = self.world_to_screen(e, n, self.rect_global, cell_size)
-        pygame.draw.circle(self.screen, self.COLOR_AGENT, (px, py), max(2, int(self.agent_radius * cell_size)))
+        pygame.draw.circle(self.screen, self.COLOR_AGENT, (px, py), 10)
         dE_a, dN_a = self.dir_from_heading(self.player_pos[2])
         self.draw_arrow(
             (px, py),
-            (int(px + 1.5 * cell_size * dE_a), int(py - 1.5 * cell_size * dN_a)),
+            (int(px + 28 * dE_a), int(py - 28 * dN_a)),
             self.COLOR_ARROW,
-            width=3,
-            head_len=10,
+            width=4,
+            head_len=12,
         )
 
-        # visited path
-        if len(self.visited_path) >= 2:
-            pts = [self.world_to_screen(p[0], p[1], self.rect_global, cell_size) for p in self.visited_path]
-            pygame.draw.lines(self.screen, self.COLOR_PATH, False, pts, 2)
-
-        # reference point
         if self.reference_point is not None:
             rx, ry = self.world_to_screen(self.reference_point[0], self.reference_point[1], self.rect_global, cell_size)
-            self.draw_x((rx, ry), size=10, color=self.COLOR_REF_POINT, width=2)
+            self.draw_x((rx, ry), size=14, color=self.COLOR_REF_POINT, width=3)
 
-        # closest path point (global에서 빨간 점)
         if self.closest_path_point is not None:
             cxp, cyp = self.world_to_screen(
                 float(self.closest_path_point[0]),
@@ -1116,185 +1183,205 @@ class SimpleMazeGrid(gym.Env):
                 self.rect_global,
                 cell_size,
             )
-            pygame.draw.circle(self.screen, self.COLOR_CLOSEST, (cxp, cyp), 3)
+            pygame.draw.circle(self.screen, self.COLOR_CLOSEST, (cxp, cyp), 5)
 
-        # sensor range
         self.draw_local_range_on_global(cell_size)
+        self._draw_legend(cell_size)
 
-        # info
-        info_x = self.rect_info.x + 10
-        cell_world = (2 * self.sensor_range) / self.local_map_size
+        # info panel
+        info_x = self.rect_info.x + 18
+        y = 22
+        blocks = [
+            (self.font, f"Return: {float(self.cumulative_reward):.2f}"),
+            (self.font, f"Steps: {self.steps}"),
+            (self.medium_font, f"v = {self.v:.2f} m/s"),
+            (self.medium_font, f"w = {self.w:.3f} rad/s"),
+            (self.medium_font, f"a_cmd = {self.a_cmd:.2f}"),
+            (self.medium_font, f"eta = {math.degrees(self.eta):.2f} deg"),
+            (self.medium_font, f"Sensor R = {self.sensor_range:.1f} m"),
+            (self.medium_font, f"hard / safe = {self.hard_zone:.1f} / {self.safety_zone:.1f} m"),
+            (self.medium_font, f"layout = {self.latest_layout_name}"),
+        ]
+        for font, txt in blocks:
+            surf = font.render(txt, True, self.COLOR_TEXT)
+            self.screen.blit(surf, (info_x, y))
+            y += surf.get_height() + 12
 
-        self.screen.blit(self.font.render(f"Return: {float(self.cumulative_reward):.2f}", True, (0, 0, 0)), (info_x, 10))
-        self.screen.blit(self.font.render(f"Steps: {self.steps}", True, (0, 0, 0)), (info_x, 50))
-        self.screen.blit(self.small_font.render(f"v: {self.v:.2f}", True, (0, 0, 0)), (info_x, 90))
-        self.screen.blit(self.small_font.render(f"w: {self.w:.3f}", True, (0, 0, 0)), (info_x, 110))
-        self.screen.blit(self.small_font.render(f"a_cmd: {self.a_cmd:.2f}", True, (0, 0, 0)), (info_x, 130))
-        self.screen.blit(self.small_font.render(f"Sensor R: {self.sensor_range:.2f}", True, (0, 0, 0)), (info_x, 150))
-        self.screen.blit(self.small_font.render(f"Cell = {cell_world:.2f} units", True, (0, 0, 0)), (info_x, 175))
-
-        # local panel
-        self.render_local_body_grid()
+        self.render_local_body_view()
 
         if self.terminated:
-            finished_text = self.font.render("FINISHED", True, (0, 0, 0))
-            self.screen.blit(
-                finished_text,
-                (self.rect_global.x + self.rect_global.width // 2 - 70, self.rect_global.y + self.rect_global.height // 2 - 20),
-            )
+            tag = "SUCCESS" if self.goal else "FINISHED"
+            panel = pygame.Rect(self.rect_global.x + 20, self.rect_global.bottom - 74, 180, 50)
+            pygame.draw.rect(self.screen, (255, 255, 255), panel, border_radius=10)
+            pygame.draw.rect(self.screen, (220, 224, 231), panel, width=1, border_radius=10)
+            finished_text = self.medium_font.render(tag, True, self.COLOR_TEXT)
+            self.screen.blit(finished_text, (panel.x + 18, panel.y + 12))
 
         pygame.display.flip()
         self.clock.tick(fps)
 
-    def render_local_body_grid(self):
+    def render_local_body_view(self):
         r = self.rect_local
-        pygame.draw.rect(self.screen, (0, 0, 0), r, width=2)
         self.screen.fill(self.COLOR_LOCAL, r)
+        pygame.draw.rect(self.screen, (220, 224, 231), r, width=1)
 
         L = self.local_map_size
         cell_px = r.width / L
         obs_grid = self.obs_grid
 
-        # 장애물 셀
         for rr in range(L):
             for cc in range(L):
                 if obs_grid[rr, cc] > 0.5:
                     x0 = r.x + cc * cell_px
                     y0 = r.y + rr * cell_px
                     rect = pygame.Rect(x0, y0, cell_px, cell_px)
-                    pygame.draw.rect(self.screen, self.COLOR_OBS_CELL, rect)
+                    pygame.draw.rect(self.screen, (125, 132, 146), rect)
 
-        # 격자선
         for i in range(L + 1):
             x_pix = r.x + i * cell_px
-            pygame.draw.line(
-                self.screen,
-                self.COLOR_GRID,
-                (x_pix, r.y),
-                (x_pix, r.y + r.height),
-                1,
-            )
+            pygame.draw.line(self.screen, self.COLOR_GRID, (x_pix, r.y), (x_pix, r.y + r.height), 1)
         for j in range(L + 1):
             y_pix = r.y + j * cell_px
-            pygame.draw.line(
-                self.screen,
-                self.COLOR_GRID,
-                (r.x, y_pix),
-                (r.x + r.width, y_pix),
-                1,
-            )
+            pygame.draw.line(self.screen, self.COLOR_GRID, (r.x, y_pix), (r.x + r.width, y_pix), 1)
 
-        # 로컬 프레임 중심 + 축
+        self._draw_local_obstacles()
+
         cx = r.x + r.width / 2.0
         cy = r.y + r.height / 2.0
-        pygame.draw.circle(self.screen, self.COLOR_AGENT, (int(cx), int(cy)), 8)
+        pygame.draw.circle(self.screen, self.COLOR_AGENT, (int(cx), int(cy)), 10)
         axis_len_px = 0.35 * L * cell_px
-        # x_b: 위쪽, y_b: 왼쪽 (원하는 방향)
-        self.draw_arrow(
-            (cx, cy),
-            (cx, cy - axis_len_px),
-            self.COLOR_ARROW,
-            width=3,
-            head_len=10,
-        )
-        self.draw_arrow(
-            (cx, cy),
-            (cx - axis_len_px, cy),  # <-- 여기만 변경
-            self.COLOR_ARROW,
-            width=3,
-            head_len=10,
-        )
+        self.draw_arrow((cx, cy), (cx, cy - axis_len_px), self.COLOR_ARROW, width=4, head_len=12)
+        self.draw_arrow((cx, cy), (cx - axis_len_px, cy), self.COLOR_ARROW, width=4, head_len=12)
 
-        S = float(self.sensor_range)
+        pts_body_px = self._body_frame_curve_pixels()
+        if len(pts_body_px) >= 2:
+            pygame.draw.lines(self.screen, self.COLOR_DUBINS, False, pts_body_px, 4)
 
-        # Dubins 경로 (바디 프레임에서 렌더)
-        if (
-            hasattr(self, "global_path")
-            and self.global_path is not None
-            and isinstance(self.global_path, np.ndarray)
-            and self.global_path.shape[0] >= 2
-        ):
-            pts_body_px = []
-            for p in self.global_path:
-                E, N = float(p[0]), float(p[1])
-                xb, yb = self.world_to_body((E, N), agent_ENpsi=self.player_pos)
-                if abs(xb) > S or abs(yb) > S:
-                    continue
-                nx = xb / S
-                ny = yb / S
-                sx = cx + ny * (r.width / 2.0)
-                sy = cy - nx * (r.height / 2.0)
-                pts_body_px.append((int(sx), int(sy)))
-
-            if len(pts_body_px) >= 2:
-                pygame.draw.lines(
-                    self.screen, self.COLOR_DUBINS, False, pts_body_px, 2
-                )
-
-        # reference point (바디에서 X표시)
         if self.reference_point is not None:
-            xb, yb = self.world_to_body(
-                (self.reference_point[0], self.reference_point[1]),
-                agent_ENpsi=self.player_pos,
-            )
+            xb, yb = self.world_to_body((self.reference_point[0], self.reference_point[1]), agent_ENpsi=self.player_pos)
+            S = float(self.sensor_range)
             if abs(xb) <= S and abs(yb) <= S:
-                nx = xb / S
-                ny = yb / S
-                sx = cx + ny * (r.width / 2.0)
-                sy = cy - nx * (r.height / 2.0)
-                self.draw_x((sx, sy), size=10, color=self.COLOR_REF_POINT, width=2)
+                sx = cx + yb / S * (r.width / 2.0)
+                sy = cy - xb / S * (r.height / 2.0)
+                self.draw_x((sx, sy), size=14, color=self.COLOR_REF_POINT, width=3)
 
-        # closest path point (body에서 빨간 점)
         if self.closest_path_point is not None:
-            xb, yb = self.world_to_body(
-                (float(self.closest_path_point[0]), float(self.closest_path_point[1])),
-                agent_ENpsi=self.player_pos,
-            )
+            xb, yb = self.world_to_body((float(self.closest_path_point[0]), float(self.closest_path_point[1])), agent_ENpsi=self.player_pos)
+            S = float(self.sensor_range)
             if abs(xb) <= S and abs(yb) <= S:
-                nx = xb / S
-                ny = yb / S
-                sx = cx + ny * (r.width / 2.0)
-                sy = cy - nx * (r.height / 2.0)
-                pygame.draw.circle(self.screen, self.COLOR_CLOSEST, (int(sx), int(sy)), 6)
+                sx = cx + yb / S * (r.width / 2.0)
+                sy = cy - xb / S * (r.height / 2.0)
+                pygame.draw.circle(self.screen, self.COLOR_CLOSEST, (int(round(sx)), int(round(sy))), 6)
 
-    def draw_local_range_on_global(self, cell_size):
-        px, py = self.world_to_screen(
-            self.player_pos[0],
-            self.player_pos[1],
-            self.rect_global,
-            cell_size,
-        )
-        radius_px = max(1, int(self.sensor_range * cell_size))
-        pygame.draw.circle(
-            self.screen, self.COLOR_LOCAL_BOX, (px, py), radius_px, 3
-        )
-
-    def draw_obstacles_on_global(self, cell_size):
-        safety_zone = float(getattr(self, "safety_zone", 0.0))
-
-        for (oE, oN, oR) in self.obstacles:
-            sx, sy = self.world_to_screen(oE, oN, self.rect_global, cell_size)
-
-            pr_obs = max(1, int(oR * cell_size))
-            pygame.draw.circle(self.screen, self.COLOR_OBS_FILL, (sx, sy), pr_obs, 0)
-            pygame.draw.circle(self.screen, self.COLOR_OBS_EDGE, (sx, sy), pr_obs, 2)
-
-            if safety_zone > 0.0:
-                hard_r = oR + self.hard_zone
-                safe_r = oR + safety_zone
-
-                hard_px = max(1, int(hard_r * cell_size))
-                safe_px = max(1, int(safe_r * cell_size))
-
-                pygame.draw.circle(
-                    self.screen, self.COLOR_HARD_ZONE, (sx, sy), hard_px, 2
-                )
-                # pygame.draw.circle(
-                #     self.screen, self.COLOR_SAFE_ZONE, (sx, sy), safe_px, 2
-                # )
+        title = self.medium_font.render("Body-frame view", True, self.COLOR_TEXT)
+        self.screen.blit(title, (r.x + 16, r.y + 14))
 
     # =========================
-    # 기타
+    # Paper figure export
+    # =========================
+    def save_publication_figure(self, save_path="paper_figure.png", dpi=300, show_local=True):
+        if show_local:
+            fig = plt.figure(figsize=(14, 7), dpi=dpi)
+            gs = fig.add_gridspec(1, 2, width_ratios=[1.7, 1.0])
+            ax_g = fig.add_subplot(gs[0, 0])
+            ax_l = fig.add_subplot(gs[0, 1])
+        else:
+            fig, ax_g = plt.subplots(figsize=(8.5, 8.0), dpi=dpi)
+            ax_l = None
+
+        # global view
+        ax_g.set_facecolor("#f7f8fa")
+        for (oE, oN, oR) in self.obstacles:
+            if self.show_safety_ring:
+                ax_g.add_patch(patches.Circle((oE, oN), oR + self.safety_zone, fill=True, facecolor="#f59e0b", alpha=0.10, edgecolor="#f59e0b", linestyle="--", linewidth=1.5))
+            ax_g.add_patch(patches.Circle((oE, oN), oR + self.hard_zone, fill=True, facecolor="#ef4444", alpha=0.12, edgecolor="#dc2626", linewidth=2.0))
+            ax_g.add_patch(patches.Circle((oE, oN), oR, fill=True, facecolor="#6b7280", edgecolor="#111827", linewidth=1.5))
+
+        if isinstance(self.global_path, np.ndarray) and self.global_path.shape[0] >= 2:
+            ax_g.plot(self.global_path[:, 0], self.global_path[:, 1], color="#06b6d4", linewidth=2.8, label="Planned path")
+        if len(self.visited_path) >= 2:
+            vp = np.asarray(self.visited_path, dtype=float)
+            ax_g.plot(vp[:, 0], vp[:, 1], color="#c026d3", linewidth=2.8, label="Executed trajectory")
+
+        start = np.asarray(self.initial_player_pos[:2], dtype=float)
+        goal = np.asarray(self.goal_pos[:2], dtype=float)
+        ax_g.scatter([start[0]], [start[1]], s=80, c="#2563eb", label="Start", zorder=5)
+        ax_g.scatter([goal[0]], [goal[1]], s=80, c="#16a34a", label="Goal", zorder=5)
+
+        ax_g.arrow(
+            start[0], start[1],
+            12 * math.cos(float(self.initial_player_pos[2])),
+            12 * math.sin(float(self.initial_player_pos[2])),
+            width=0.6, head_width=4.0, head_length=5.0, color="#2563eb", length_includes_head=True,
+        )
+        ax_g.arrow(
+            goal[0], goal[1],
+            12 * math.cos(float(self.goal_pos[2])),
+            12 * math.sin(float(self.goal_pos[2])),
+            width=0.6, head_width=4.0, head_length=5.0, color="#16a34a", length_includes_head=True,
+        )
+
+        if self.reference_point is not None:
+            ax_g.scatter([self.reference_point[0]], [self.reference_point[1]], s=70, marker="x", c="#a21caf", linewidths=2.0, label="Reference")
+        if self.closest_path_point is not None:
+            ax_g.scatter([self.closest_path_point[0]], [self.closest_path_point[1]], s=50, c="#ef4444", edgecolors="white", linewidths=0.8, label="Closest path point")
+
+        sensor_circle = patches.Circle((self.player_pos[0], self.player_pos[1]), self.sensor_range, fill=False, edgecolor="#10b981", linewidth=1.8, linestyle="--", alpha=0.9)
+        ax_g.add_patch(sensor_circle)
+
+        ax_g.set_xlim(0, self.global_map_size)
+        ax_g.set_ylim(0, self.global_map_size)
+        ax_g.set_aspect("equal", adjustable="box")
+        ax_g.set_xlabel("E [m]")
+        ax_g.set_ylabel("N [m]")
+        ax_g.set_title("Global trajectory and obstacle corridor", fontweight="bold")
+        ax_g.grid(True, linestyle=":", alpha=0.35)
+        ax_g.legend(loc="upper right", fontsize=9, frameon=True)
+
+        # local view
+        if ax_l is not None:
+            ax_l.set_facecolor("#f7f8fa")
+            S = float(self.sensor_range)
+            ax_l.imshow(self.obs_grid, cmap="Greys", origin="upper", extent=[-S, S, -S, S], alpha=0.30)
+
+            for (oE, oN, oR) in self.obstacles:
+                xb, yb = self.world_to_body((oE, oN), agent_ENpsi=self.player_pos)
+                center_xy = (yb, xb)
+                if self.show_safety_ring:
+                    ax_l.add_patch(patches.Circle(center_xy, oR + self.safety_zone, fill=True, facecolor="#f59e0b", alpha=0.10, edgecolor="#f59e0b", linestyle="--", linewidth=1.2))
+                ax_l.add_patch(patches.Circle(center_xy, oR + self.hard_zone, fill=True, facecolor="#ef4444", alpha=0.12, edgecolor="#dc2626", linewidth=1.6))
+                ax_l.add_patch(patches.Circle(center_xy, oR, fill=True, facecolor="#6b7280", edgecolor="#111827", linewidth=1.2))
+
+            if isinstance(self.global_path, np.ndarray) and self.global_path.shape[0] >= 2:
+                body_xy = np.array([self.world_to_body((float(p[0]), float(p[1])), agent_ENpsi=self.player_pos) for p in self.global_path], dtype=float)
+                keep = (np.abs(body_xy[:, 0]) <= S) & (np.abs(body_xy[:, 1]) <= S)
+                body_xy = body_xy[keep]
+                if len(body_xy) >= 2:
+                    ax_l.plot(body_xy[:, 1], body_xy[:, 0], color="#06b6d4", linewidth=2.5)
+
+            ax_l.scatter([0.0], [0.0], s=80, c="#2563eb", zorder=5)
+            ax_l.arrow(0.0, 0.0, 0.0, 10.0, width=0.25, head_width=2.0, head_length=2.5, color="#111827", length_includes_head=True)
+            ax_l.arrow(0.0, 0.0, -10.0, 0.0, width=0.25, head_width=2.0, head_length=2.5, color="#111827", length_includes_head=True)
+
+            if self.reference_point is not None:
+                xb, yb = self.world_to_body((self.reference_point[0], self.reference_point[1]), agent_ENpsi=self.player_pos)
+                ax_l.scatter([yb], [xb], s=70, marker="x", c="#a21caf", linewidths=2.0)
+
+            ax_l.set_xlim(-S, S)
+            ax_l.set_ylim(-S, S)
+            ax_l.set_aspect("equal", adjustable="box")
+            ax_l.set_xlabel(r"$y_b$ [m]")
+            ax_l.set_ylabel(r"$x_b$ [m]")
+            ax_l.set_title("Body-frame local view", fontweight="bold")
+            ax_l.grid(True, linestyle=":", alpha=0.35)
+
+        fig.tight_layout()
+        fig.savefig(save_path, bbox_inches="tight")
+        plt.close(fig)
+        return save_path
+
+    # =========================
+    # Misc
     # =========================
     def close(self):
         if self.render_option:
@@ -1327,12 +1414,8 @@ class SimpleMazeGrid(gym.Env):
                             target_heading = -math.pi / 4
 
                         if target_heading is not None:
-                            dpsi = self.normalize_angle(
-                                target_heading - self.player_pos[2]
-                            )
-                            w = np.clip(
-                                dpsi / self.dt, -self.max_w, self.max_w
-                            )
+                            dpsi = self.normalize_angle(target_heading - self.player_pos[2])
+                            w = np.clip(dpsi / self.dt, -self.max_w, self.max_w)
                             raw = w / self.max_w
                             self.step(np.array([raw], dtype=np.float32))
 
@@ -1351,11 +1434,7 @@ class SimpleMazeGrid(gym.Env):
         return self.player_pos.copy()
 
     def get_all_states(self):
-        return [
-            [j, i]
-            for i in range(self.global_map_size)
-            for j in range(self.global_map_size)
-        ]
+        return [[j, i] for i in range(self.global_map_size) for j in range(self.global_map_size)]
 
     def simulate_action(self, player_pos, action):
         self.retry()
@@ -1364,11 +1443,6 @@ class SimpleMazeGrid(gym.Env):
         return next_state, reward, terminated
 
     def plot_w_history(self, show=True, save_path=None, title="Yaw rate (w) vs Time"):
-        """
-        누적된 time_table, w_table을 사용해서 각속도(w) 그래프를 그림.
-        - show=True  : 창 띄움
-        - save_path  : 경로 지정 시 이미지 저장
-        """
         if len(self.time_table) == 0 or len(self.w_table) == 0:
             print("[plot_w_history] No data to plot. Run steps first.")
             return
@@ -1376,15 +1450,15 @@ class SimpleMazeGrid(gym.Env):
         t = np.asarray(self.time_table, dtype=float)
         w = np.asarray(self.w_table, dtype=float)
 
-        plt.figure()
-        plt.plot(t, w)
+        plt.figure(figsize=(8, 4.5))
+        plt.plot(t, w, linewidth=2.0)
         plt.xlabel("Time [s]")
         plt.ylabel("Yaw rate w [rad/s]")
         plt.title(title)
-        plt.grid(True)
+        plt.grid(True, linestyle=":", alpha=0.4)
 
         if save_path is not None:
-            plt.savefig(save_path, dpi=150)
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
 
         if show:
             plt.show()
@@ -1392,16 +1466,7 @@ class SimpleMazeGrid(gym.Env):
             plt.close()
 
 
-# =========================
-# 메인 테스트
-# =========================
 if __name__ == "__main__":
-    spec = (
-        [90, 90, -2 * math.pi / 4],
-        [20, 35, -2 * math.pi / 4],
-        [69, 72, 5],
-    )
-
     env = SimpleMazeGrid(
         global_map_size=400,
         local_map_size=125,
@@ -1409,16 +1474,19 @@ if __name__ == "__main__":
         w=[-0.46, 0.46],
         dt=0.1,
         render_option=True,
-        random_seed=None,
-        spec=None,  # 고정 시나리오
-        obstacle_count=1,
+        random_seed=0,
+        spec=None,
+        obstacle_count=2,
         obstacle_min_radius=2.0,
         obstacle_max_radius=10.0,
-        sensor_range=25.0, 
+        sensor_range=35.0,
         use_lidar_edges=True,
         lidar_num_rays=360,
         lidar_fov=math.pi * 2,
-        reference_L=15.0,  # 에이전트가 전방을 바라보는 정도, 50 -> 15로 축소
+        reference_L=15.0,
+        hard_zone=2.0,
+        safety_zone=4.0,
+        obstacle_layout="corridor_pair",
     )
 
     env.render()
