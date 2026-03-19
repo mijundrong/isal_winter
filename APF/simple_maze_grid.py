@@ -2304,26 +2304,26 @@ if __name__ == "__main__":
     # 3. 실험 목록 (색상: orange, Blue, Red / 스타일: 실선)
     # ---------------------------------------------------------
     experiments = [
-        # {
-        #     "name": "Non-linear + APF",
-        #     "type": "apf",
-        #     "path": None,
-        #     "color": "red",  
-        #     "style": "-"      
-        # },
         {
-            "name": "SAC (Eta+Track+Obs)",
+            "name": "Model 1 (eta+obs)",
             "type": "sac",
-            "path": "sac_maze_checkpoint_three", 
-            "color": "orange",
-            "style": "-"      
+            "path": "sac_maze_checkpoint_model1",
+            "color": "tab:blue",
+            "style": "-"
         },
         {
-            "name": "SAC (Eta+Track+Obs+Time)",
+            "name": "Model 2 (eta+obs+track)",
             "type": "sac",
-            "path": "sac_maze_checkpoint_520000",
-            "color": "blue",    
-            "style": "-"       
+            "path": "sac_maze_checkpoint_model2",
+            "color": "tab:orange",
+            "style": "-"
+        },
+        {
+            "name": "Model 3 (eta+obs+time)",
+            "type": "sac",
+            "path": "sac_maze_checkpoint_model3",
+            "color": "tab:green",
+            "style": "-"
         }
     ]
 
@@ -2374,21 +2374,19 @@ if __name__ == "__main__":
     # 5. [추가된 부분] 정량적 지표 (비행 시간 & Max Error) 분석 및 출력
     # =========================================================
     print("\n===== 정량적 지표 분석 결과 =====")
-    
+
     for name, data in results.items():
         if 'err' in data and len(data['err']) > 0:
-            err_data = np.array(data['err'])
-            
-            # 1) 총 비행 시간 계산
+            err_data = np.array(data['err'], dtype=float)
+            err_data = err_data[~np.isnan(err_data)]
+
             total_time = data['time'][-1] if len(data['time']) > 0 else 0.0
-            
-            # 2) 최대 경로 추종 오차 (Max Error) 계산
-            max_err = np.max(err_data)
-            
-            # 3) 평균 경로 추종 오차 (Mean Error) 계산
-            mean_err = np.mean(err_data)
-            
+            max_err = np.max(err_data) if len(err_data) > 0 else np.nan
+            mean_err = np.mean(err_data) if len(err_data) > 0 else np.nan
+            p95_err = np.percentile(err_data, 95) if len(err_data) > 0 else np.nan
+
             print(f"[{name}]")
-            print(f"  - 비행 시간 (Total Time): {total_time:.1f} s")
-            print(f"  - 최대 경로 추종 오차 (Max Error): {max_err:.2f} m")
-            print(f"  - 평균 경로 추종 오차 (Mean Error): {mean_err:.2f} m\n")
+            print(f"  - Mean Error : {mean_err:.2f} m")
+            print(f"  - Max Error  : {max_err:.2f} m")
+            print(f"  - 95% Error  : {p95_err:.2f} m")
+            print(f"  - Time       : {total_time:.1f} s\n")
