@@ -68,7 +68,7 @@ class SimpleMazeGrid(gym.Env):
         #self.path_planner = dubins_path(1 / self.R, 0.1)
         self.extension_len = 400
 
-        self.max_steps = 3000
+        self.max_steps = 1500  #3000이었음
         self.terminated_radius = 3.0
 
         # ---- History ----
@@ -96,9 +96,9 @@ class SimpleMazeGrid(gym.Env):
         self.obstacle_max_r = float(obstacle_max_radius)
 
         self.radius = 400
-        self.agent_radius = 0.0 #로봇의 물리적인 크기, 논문에 넣을거면 넣어도 괜찮음
-        self.safety_zone = 4.0  # 충돌하진 않았지만 위험할 정도로 가까운 상태를 평가
-        self.hard_zone = 2.0    # 도달하면 아예 안되는 구간
+        self.agent_radius = 5.0 #로봇의 물리적인 크기, 논문에 넣을거면 넣어도 괜찮음
+        self.safety_zone = 35.0  # 50
+        self.hard_zone = 15.0    # 25
 
         # ---- Runtime states ----
         self.terminated = False
@@ -125,8 +125,8 @@ class SimpleMazeGrid(gym.Env):
         self.reward_cfg = {
             "w_smooth": 0.0,
             "w_obs": 0.75,
-            "w_time": 0.5,
-            "w_track": 0.5,
+            "w_time": 0.0, #model 2F
+            "w_track": 0.0, #model 3
             "w_eta": 0.5,
             "bonus_goal": 100.0,
             "penalty_collision": -100.0,
