@@ -8,11 +8,11 @@ class MazeSACActor(nn.Module):
     """
     SB3 SAC MultiInputPolicy의 actor 부분만 그대로 복제한 네트워크
     - obs dict:
-      - "err_hist": (B, 20)
-      - "w_hist"  : (B, 10)
+      - "eta_hist": (B, 2)
+      - "w_hist"  : (B, 1)
       - "obstacle_pos": (B, 1, 100, 100)  # 0~255
     """
-    def __init__(self, err_dim=20, w_dim=10, img_h=100, img_w=100, action_dim=1):
+    def __init__(self, eta_dim=2, w_dim=1, img_h=100, img_w=100, action_dim=1):
         super().__init__()
 
         # NatureCNN과 동일
@@ -31,8 +31,8 @@ class MazeSACActor(nn.Module):
             nn.ReLU(),
         )
 
-        vec_dim = err_dim + w_dim  # 20 + 10 = 30
-        feat_dim = 256 + vec_dim   # 256 + 30 = 286
+        vec_dim = eta_dim + w_dim  # 2 + 1= = 3
+        feat_dim = 256 + vec_dim   # 256 + 3 = 259
 
         self.mlp = nn.Sequential(
             nn.Linear(feat_dim, 256),
@@ -48,18 +48,18 @@ class MazeSACActor(nn.Module):
         """
         obs_dict:
           - "obstacle_pos": torch.uint8 or float, (B,1,H,W)
-          - "err_hist"    : (B,20)
-          - "w_hist"      : (B,10)
+          - "eta_hist"    : (B,2)
+          - "w_hist"      : (B,1)
         """
         img = obs_dict["obstacle_pos"].float() / 255.0   # (B,1,100,100)
-        err = obs_dict["err_hist"].float()               # (B,20)
-        w_hist = obs_dict["w_hist"].float()              # (B,10)
+        eta = obs_dict["eta_hist"].float()
+        w_hist = obs_dict["w_hist"].float()
 
         img_feat = self.cnn(img)          # (B,5184)
         img_feat = self.cnn_linear(img_feat)  # (B,256)
 
-        # ★ SB3 CombinedExtractor와 동일한 순서: [err, obs_feat, w_hist]
-        feat = torch.cat([err, img_feat, w_hist], dim=-1)  # (B,286)
+        # ★ SB3 CombinedExtractor와 동일한 순서: [eta, obs_feat, w_hist]
+        feat = torch.cat([eta, img_feat, w_hist], dim=-1)  # (B,256)
 
         h = self.mlp(feat)           # (B,256)
         mu = self.mu(h)              # (B,1)
@@ -79,7 +79,7 @@ def convert_sb3_sac_to_ros_pth(zip_path: str, out_pth: str):
     print(model.policy)
 
     # 2) ROS용 actor 네트워크 생성
-    ros_actor = MazeSACActor(err_dim=20, w_dim=10, img_h=100, img_w=100, action_dim=1)
+    ros_actor = MazeSACActor(eta_dim=2, w_dim=1, img_h=100, img_w=100, action_dim=1)
     sd_ros = ros_actor.state_dict()
 
     # 3) 키 매핑 (actor 기준)
