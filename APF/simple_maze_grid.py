@@ -1941,7 +1941,7 @@ if __name__ == "__main__":
     spec2 = (
         [stadium_pts[0][0], stadium_pts[0][1], stadium_heading],
         [
-            [1010, 980, 40],  # 상단 우측 근처
+            [1010, 950, 40],  # 상단 우측 근처
         ],
     )
     waypoints2 = stadium_pts[1:]
@@ -1964,7 +1964,7 @@ if __name__ == "__main__":
     spec3 = (
         [rolling_pts[0][0], rolling_pts[0][1], rolling_pts[0][2]],
         [
-            [900, 470, 20]
+            [900, 440, 20]
         ],
     )
 
@@ -1982,8 +1982,8 @@ if __name__ == "__main__":
         w=[-0.46, 0.46],            
         dt=0.1,
         render_option=False,  
-        spec=spec1,            # <--- Scenario 1, 2, 3 중 선택 (spec, spec1...)
-        waypoints=waypoints1,  # <--- Scenario 1, 2, 3 중 선택 (waypoints, waypoints1...)
+        spec=spec2,            # <--- Scenario 1, 2, 3 중 선택 (spec, spec1...)
+        waypoints=waypoints2,  # <--- Scenario 1, 2, 3 중 선택 (waypoints, waypoints1...)
         sensor_range=100.0,          
         reference_L=50.0,  # 전방주시거리, 앞을 얼마나 멀리 내다보는지       
         fly_by=False,
@@ -2206,7 +2206,7 @@ if __name__ == "__main__":
         plt.grid(True, linestyle="--", alpha=0.4)
         plt.axis('equal')
         plt.legend(
-            loc='lower left',
+            loc='upper right',
             framealpha=0.8,
             facecolor='white',
             edgecolor='#cccccc',
@@ -2319,9 +2319,9 @@ if __name__ == "__main__":
             "style": "-"
         },
         {
-            "name": "Model 3 (eta+obs+time)",
+            "name": "Model 3 (eta+obs+track+time)",
             "type": "sac",
-            "path": "sac_maze_checkpoint_model3",
+            "path": "sac_maze_checkpoint_1000000",
             "color": "tab:green",
             "style": "-"
         }
