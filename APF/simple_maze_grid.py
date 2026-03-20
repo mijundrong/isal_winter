@@ -1930,7 +1930,7 @@ if __name__ == "__main__":
         radius=170.0,
         n_straight=18,
         n_arc=24,
-        rotate_deg=8.0
+        rotate_deg=0.0   # 기존 8.0 -> 0.0
     )
 
     stadium_heading = math.atan2(
@@ -1941,7 +1941,7 @@ if __name__ == "__main__":
     spec2 = (
         [stadium_pts[0][0], stadium_pts[0][1], stadium_heading],
         [
-            [1010, 950, 40],  # 상단 우측 근처
+            [910, 920, 40],  # 장애물은 그대로 유지
         ],
     )
     waypoints2 = stadium_pts[1:]
@@ -1953,7 +1953,7 @@ if __name__ == "__main__":
         center=(900.0, 700.0),
         radius=250.0,
         cross_angle_deg=125.0,
-        line_len=165.0,
+        line_len=250.0,
         exit_len=250.0,  # 추가
         n_line=14,
         n_circle=120,
@@ -1982,8 +1982,8 @@ if __name__ == "__main__":
         w=[-0.46, 0.46],            
         dt=0.1,
         render_option=False,  
-        spec=spec2,            # <--- Scenario 1, 2, 3 중 선택 (spec, spec1...)
-        waypoints=waypoints2,  # <--- Scenario 1, 2, 3 중 선택 (waypoints, waypoints1...)
+        spec=spec3,            # <--- Scenario 1, 2, 3 중 선택 (spec, spec1...)
+        waypoints=waypoints3,  # <--- Scenario 1, 2, 3 중 선택 (waypoints, waypoints1...)
         sensor_range=100.0,          
         reference_L=50.0,  # 전방주시거리, 앞을 얼마나 멀리 내다보는지       
         fly_by=False,
