@@ -125,9 +125,9 @@ class SimpleMazeGrid(gym.Env):
         self.reward_cfg = {
             "w_smooth": 0.0,
             "w_obs": 0.75,
-            "w_time": 0.0, #model 2F
-            "w_track": 0.0, #model 3
-            "w_eta": 0.5,
+            "w_time": 0.0, 
+            "w_track": 0.5, 
+            "w_eta": 0.0,
             "bonus_goal": 100.0,
             "penalty_collision": -100.0,
             "penalty_timeout": -100.0,
