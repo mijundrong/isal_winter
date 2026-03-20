@@ -398,9 +398,6 @@ class SimpleMazeGrid(gym.Env):
         raw = np.clip(raw, -1.0, 1.0)
         self.w = raw * self.max_w
 
-        self._push_w(self.w)
-        self._push_err(self.eta)
-
         new_pos = self.player_pos.copy()
         new_pos[2] = self.normalize_angle(new_pos[2] + self.w * self.dt)
         dE = self.v * math.cos(new_pos[2]) * self.dt
@@ -410,6 +407,8 @@ class SimpleMazeGrid(gym.Env):
         self.player_pos = new_pos
 
         self._refresh_guidance_state()
+        self._push_w(self.w)
+        self._push_err(self.eta)
         new_path_dist = self._compute_path_dist_from_current_window(new_pos[:2])
 
         w_arr = np.array(self.w_hist, dtype=np.float32)
