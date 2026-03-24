@@ -1816,7 +1816,7 @@ if __name__ == "__main__":
         [150, 750, radians(90)],
         [
             [450, 1050, 40],
-            [1050, 450, 40]
+            [1050, 460, 40]
         ],
     )
 
@@ -1963,7 +1963,7 @@ if __name__ == "__main__":
     spec3 = (
         [rolling_pts[0][0], rolling_pts[0][1], rolling_pts[0][2]],
         [
-            [900, 440, 20]
+            [900, 450, 40]
         ],
     )
 
@@ -1981,8 +1981,8 @@ if __name__ == "__main__":
         w=[-0.46, 0.46],            
         dt=0.1,
         render_option=False,  
-        spec=spec3,            # <--- Scenario 1, 2, 3 중 선택 (spec, spec1...)
-        waypoints=waypoints3,  # <--- Scenario 1, 2, 3 중 선택 (waypoints, waypoints1...)
+        spec=spec2,            # <--- Scenario 1, 2, 3 중 선택 (spec, spec1...)
+        waypoints=waypoints2,  # <--- Scenario 1, 2, 3 중 선택 (waypoints, waypoints1...)
         sensor_range=100.0,          
         reference_L=50.0,  # 전방주시거리, 앞을 얼마나 멀리 내다보는지       
         fly_by=False,
@@ -2200,18 +2200,41 @@ if __name__ == "__main__":
                 zorder=3
             )
 
+        # --- [추가된 부분] Model 3의 시작점과 도착점 별표 표시 ---
+            if "Model 3" in name:
+                # 시작점 (Start Point) - 검은색 별
+                plt.scatter(
+                    traj[0, 0] - offset, traj[0, 1] - offset,
+                    marker='*', facecolor='black', s=400, edgecolors='black',
+                    label='Start Point', zorder=10
+                )
+                # 도착점 (End Point) - 흰색 별 (테두리는 검은색)
+                plt.scatter(
+                    traj[-1, 0] - offset, traj[-1, 1] - offset,
+                    marker='*', facecolor='white', s=400, edgecolors='black',
+                    label='End Point', zorder=10
+                )
+            # ----------------------------------------------------
+
         plt.xlabel("X Position [m]")
         plt.ylabel("Y Position [m]")
         plt.grid(True, linestyle="--", alpha=0.4)
         plt.axis('equal')
-        plt.legend(
-            loc='upper right',
-            framealpha=0.8,
+        # 범례를 그래프 아래 바깥으로 빼고, 옅은 테두리 적용
+        leg = plt.legend(
+            loc='upper center',
+            bbox_to_anchor=(0.5, -0.12), # 그래프 박스 아래쪽으로 위치 지정
+            ncol=2,                      # 범례 항목을 2열로 나란히 배치
+            framealpha=0.9,
             facecolor='white',
-            edgecolor='#cccccc',
+            edgecolor='black',             # 테두리를 짙은 회색으로 변경 (또는 '#808080')
             shadow=False,
-            fontsize=18
+            fontsize=16                  # 2열 배치 시 겹치지 않게 폰트 크기 살짝 조정 (필요시 18 유지)
         )
+        
+        # 테두리 선 굵기 얇게 설정 (Matplotlib 권장 방식)
+        leg.get_frame().set_linewidth(0.8) 
+
         plt.tight_layout()
         plt.show()
 
@@ -2237,7 +2260,7 @@ if __name__ == "__main__":
         plt.ylabel("Cross Track Error [m]")
         plt.grid(True, linestyle="--", alpha=0.4)
         plt.legend(
-            loc='upper right',
+            loc='upper left',
             framealpha=0.5,
             facecolor='white',
             edgecolor='#cccccc',
@@ -2304,21 +2327,21 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     experiments = [
         {
-            "name": "Model 1 (eta+obs)",
+            "name": "Model 1 (track+obs)",
             "type": "sac",
-            "path": "sac_maze_checkpoint_model1",
+            "path": "best_model",
             "color": "tab:blue",
             "style": "-"
         },
         {
-            "name": "Model 2 (eta+obs+track)",
+            "name": "Model 2 (track+obs+eta)",
             "type": "sac",
             "path": "sac_maze_checkpoint_model2",
             "color": "tab:orange",
             "style": "-"
         },
         {
-            "name": "Model 3 (eta+obs+track+time)",
+            "name": "Model 3 (track+obs+eta+time)",
             "type": "sac",
             "path": "sac_maze_checkpoint_1000000",
             "color": "tab:green",
