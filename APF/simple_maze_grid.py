@@ -1969,29 +1969,14 @@ if __name__ == "__main__":
 
     waypoints3 = rolling_pts[1:]
 
-
     # ---------------------------------------------------------
-    # 1. 환경 설정 (사용할 시나리오 선택)
+    # 1. 시나리오 목록
     # ---------------------------------------------------------
-    # 현재는 spec3, waypoints3 (논문용)을 사용하도록 설정됨.
-    env = SimpleMazeGrid(
-        global_map_size=1500,        
-        local_map_size=100,
-        v=15.0,                      
-        w=[-0.46, 0.46],            
-        dt=0.1,
-        render_option=False,  
-        spec=spec2,            # <--- Scenario 1, 2, 3 중 선택 (spec, spec1...)
-        waypoints=waypoints,  # <--- Scenario 1, 2, 3 중 선택 (waypoints, waypoints1...)
-        sensor_range=100.0,          
-        reference_L=50.0,  # 전방주시거리, 앞을 얼마나 멀리 내다보는지       
-        fly_by=False,
-        scenarios = [
+    scenarios = [
         {"title": "Map 1", "spec": spec1, "waypoints": waypoints1},
         {"title": "Map 2", "spec": spec2, "waypoints": waypoints2},
         {"title": "Map 3", "spec": spec3, "waypoints": waypoints3},
-        ]
-    )
+    ]
 
     # ---------------------------------------------------------
     # 2. 비교 시각화 함수 정의
@@ -2144,53 +2129,45 @@ if __name__ == "__main__":
         print(f"ISE (∫e^2 dt)   : {ISE:.3f} m²·s")
 
 
-    def visualize_comparison_all(all_results):
+    def visualize_comparison(env, results_dict):
         plt.rcParams.update({
-        'font.size': 16,
-        'axes.titlesize': 18,
-        'axes.labelsize': 16,
-        'xtick.labelsize': 14,
-        'ytick.labelsize': 14,
-        'legend.fontsize': 14,
-        'figure.titlesize': 20
-    })
+            'font.size': 16,
+            'axes.titlesize': 20,
+            'axes.labelsize': 18,
+            'xtick.labelsize': 16,
+            'ytick.labelsize': 16,
+            'legend.fontsize': 22,
+            'figure.titlesize': 22
+        })
 
-    import pandas as pd
-
-    # =====================================================
-    # Graph 1: Trajectory (1x3 subplot)
-    # =====================================================
-    fig, axes = plt.subplots(1, 3, figsize=(24, 8))
-    legend_handles = None
-    legend_labels = None
-
-    for ax, scenario_data in zip(axes, all_results):
-        env = scenario_data["env"]
-        results_dict = scenario_data["results"]
-        title = scenario_data["title"]
+        import pandas as pd
 
         offset = env.global_map_size / 2.0
         hard_zone_margin = getattr(env, "hard_zone", 2.0)
+
+        # -------------------------
+        # Graph 1: Trajectory
+        # -------------------------
+        plt.figure(figsize=(10, 10))
+        ax = plt.gca()
 
         for i, (oE, oN, oR) in enumerate(env.obstacles):
             lbl_obs = 'Obstacle' if i == 0 else None
             circle = patches.Circle(
                 (oE - offset, oN - offset), oR,
-                edgecolor='black', facecolor='gray', alpha=0.5,
-                zorder=1, label=lbl_obs
+                edgecolor='black', facecolor='gray', alpha=0.5, zorder=1, label=lbl_obs
             )
             ax.add_patch(circle)
 
             lbl_hard = 'Hard Limit' if i == 0 else None
             hard_circle = patches.Circle(
                 (oE - offset, oN - offset), oR + hard_zone_margin,
-                edgecolor='red', facecolor='none', linewidth=1.5,
-                linestyle=':', zorder=1, label=lbl_hard
+                edgecolor='red', facecolor='none', linewidth=1.5, linestyle=':', zorder=1, label=lbl_hard
             )
             ax.add_patch(hard_circle)
 
         if env.global_path is not None and len(env.global_path) > 0:
-            ax.plot(
+            plt.plot(
                 env.global_path[:, 0] - offset,
                 env.global_path[:, 1] - offset,
                 color='cyan',
@@ -2202,122 +2179,92 @@ if __name__ == "__main__":
 
         for name, data in results_dict.items():
             traj = data['traj']
-            ax.plot(
+            plt.plot(
                 traj[:, 0] - offset,
                 traj[:, 1] - offset,
                 color=data['color'],
                 linestyle=data['style'],
-                linewidth=2.5,
+                linewidth=3,
                 label=name,
-                alpha=0.95,
+                alpha=0.9,
                 zorder=3
             )
 
+        # --- [추가된 부분] Model 3의 시작점과 도착점 별표 표시 ---
             if "Model 3" in name:
-                ax.scatter(
+                # 시작점 (Start Point) - 검은색 별
+                plt.scatter(
                     traj[0, 0] - offset, traj[0, 1] - offset,
-                    marker='*', facecolor='black', s=220, edgecolors='black',
+                    marker='*', facecolor='black', s=400, edgecolors='black',
                     label='Start Point', zorder=10
                 )
-                ax.scatter(
+                # 도착점 (End Point) - 흰색 별 (테두리는 검은색)
+                plt.scatter(
                     traj[-1, 0] - offset, traj[-1, 1] - offset,
-                    marker='*', facecolor='white', s=220, edgecolors='black',
+                    marker='*', facecolor='white', s=400, edgecolors='black',
                     label='End Point', zorder=10
                 )
+            # ----------------------------------------------------
 
-        ax.set_title(title)
-        ax.set_xlabel("X Position [m]")
-        if ax is axes[0]:
-            ax.set_ylabel("Y Position [m]")
-        ax.grid(True, linestyle="--", alpha=0.4)
-        ax.axis('equal')
+        plt.xlabel("X Position [m]")
+        plt.ylabel("Y Position [m]")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.axis('equal')
+        # 범례를 그래프 아래 바깥으로 빼고, 옅은 테두리 적용
+        leg = plt.legend(
+            loc='upper center',
+            bbox_to_anchor=(0.5, -0.12), # 그래프 박스 아래쪽으로 위치 지정
+            ncol=2,                      # 범례 항목을 2열로 나란히 배치
+            framealpha=0.9,
+            facecolor='white',
+            edgecolor='black',             # 테두리를 짙은 회색으로 변경 (또는 '#808080')
+            shadow=False,
+            fontsize=16                  # 2열 배치 시 겹치지 않게 폰트 크기 살짝 조정 (필요시 18 유지)
+        )
+        
+        # 테두리 선 굵기 얇게 설정 (Matplotlib 권장 방식)
+        leg.get_frame().set_linewidth(0.8) 
 
-        handles, labels = ax.get_legend_handles_labels()
-        if legend_handles is None:
-            uniq = {}
-            for h, l in zip(handles, labels):
-                if l not in uniq:
-                    uniq[l] = h
-            legend_labels = list(uniq.keys())
-            legend_handles = list(uniq.values())
+        plt.tight_layout()
+        plt.show()
 
-    fig.legend(
-        legend_handles,
-        legend_labels,
-        loc='lower center',
-        bbox_to_anchor=(0.5, -0.03),
-        ncol=4,
-        framealpha=0.9,
-        facecolor='white',
-        edgecolor='black'
-    )
-    plt.tight_layout(rect=[0, 0.08, 1, 1])
-    plt.show()
-
-    # =====================================================
-    # Graph 2: Cross Track Error (1x3 subplot)
-    # =====================================================
-    fig, axes = plt.subplots(1, 3, figsize=(24, 6), sharey=True)
-    legend_handles = None
-    legend_labels = None
-
-    for ax, scenario_data in zip(axes, all_results):
-        results_dict = scenario_data["results"]
-        title = scenario_data["title"]
-
+        # -------------------------
+        # Graph 2: Cross Track Error
+        # -------------------------
+        plt.figure(figsize=(10, 6))
         for name, data in results_dict.items():
             min_len = min(len(data['time']), len(data['err']))
             t_data = data['time'][:min_len]
             err_data = data['err'][:min_len]
 
-            ax.plot(
+            plt.plot(
                 t_data,
                 err_data,
                 color=data['color'],
                 linestyle=data['style'],
-                linewidth=2.2,
+                linewidth=2.5,
                 label=name
             )
 
-        ax.set_title(title)
-        ax.set_xlabel("Time [s]")
-        if ax is axes[0]:
-            ax.set_ylabel("Cross Track Error [m]")
-        ax.grid(True, linestyle="--", alpha=0.4)
+        plt.xlabel("Time [s]")
+        plt.ylabel("Cross Track Error [m]")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.legend(
+            loc='upper left',
+            framealpha=0.5,
+            facecolor='white',
+            edgecolor='#cccccc',
+            shadow=False,
+            fontsize=18
+        )
+        plt.tight_layout()
+        plt.show()
 
-        handles, labels = ax.get_legend_handles_labels()
-        if legend_handles is None:
-            uniq = {}
-            for h, l in zip(handles, labels):
-                if l not in uniq:
-                    uniq[l] = h
-            legend_labels = list(uniq.keys())
-            legend_handles = list(uniq.values())
-
-    fig.legend(
-        legend_handles,
-        legend_labels,
-        loc='lower center',
-        bbox_to_anchor=(0.5, -0.03),
-        ncol=3,
-        framealpha=0.9,
-        facecolor='white',
-        edgecolor='black'
-    )
-    plt.tight_layout(rect=[0, 0.08, 1, 1])
-    plt.show()
-
-    # =====================================================
-    # Graph 3: Yaw Rate (1x3 subplot)
-    # =====================================================
-    fig, axes = plt.subplots(1, 3, figsize=(24, 6), sharey=True)
-    legend_handles = None
-    legend_labels = None
-    window_size = 10
-
-    for ax, scenario_data in zip(axes, all_results):
-        results_dict = scenario_data["results"]
-        title = scenario_data["title"]
+        # -------------------------
+        # Graph 3: Yaw Rate
+        # -------------------------
+        plt.figure(figsize=(10, 6))
+        window_size = 10
 
         for name, data in results_dict.items():
             if 'w' in data and len(data['w']) > 0:
@@ -2325,48 +2272,270 @@ if __name__ == "__main__":
                 t_data = data['time'][:min_len]
                 w_data = data['w'][:min_len]
 
+                plt.plot(
+                    t_data,
+                    w_data,
+                    color=data['color'],
+                    linestyle=data['style'],
+                    linewidth=1.0,
+                    alpha=0.3,
+                    label=f"{name}_Raw"
+                )
+
                 w_smooth = pd.Series(w_data).rolling(
                     window=window_size,
                     center=True,
                     min_periods=1
                 ).mean()
 
-                ax.plot(
+                plt.plot(
                     t_data,
                     w_smooth,
+                    color=data['color'],
+                    linestyle=data['style'],
+                    linewidth=2.5,
+                    label=name,
+                    alpha=1.0
+                )
+
+        plt.xlabel("Time [s]")
+        plt.ylabel("Yaw Rate [rad/s]")
+        plt.grid(True, linestyle="--", alpha=0.4)
+        plt.legend(
+            loc='lower left',
+            framealpha=0.5,
+            facecolor='white',
+            edgecolor='#cccccc',
+            shadow=False,
+            fontsize=18
+        )
+        plt.tight_layout()
+        plt.show()
+
+
+    def visualize_comparison_all(all_results):
+        import pandas as pd
+
+        plt.rcParams.update({
+            'font.size': 16,
+            'axes.titlesize': 18,
+            'axes.labelsize': 16,
+            'xtick.labelsize': 14,
+            'ytick.labelsize': 14,
+            'legend.fontsize': 14,
+            'figure.titlesize': 20
+        })
+
+        # =====================================================
+        # Graph 1: Trajectory (1x3)
+        # =====================================================
+        fig, axes = plt.subplots(1, 3, figsize=(24, 8))
+        legend_handles = None
+        legend_labels = None
+
+        for ax, scenario_data in zip(axes, all_results):
+            env = scenario_data["env"]
+            results_dict = scenario_data["results"]
+            title = scenario_data["title"]
+
+            offset = env.global_map_size / 2.0
+            hard_zone_margin = getattr(env, "hard_zone", 2.0)
+
+            for i, (oE, oN, oR) in enumerate(env.obstacles):
+                lbl_obs = 'Obstacle' if i == 0 else None
+                circle = patches.Circle(
+                    (oE - offset, oN - offset), oR,
+                    edgecolor='black', facecolor='gray', alpha=0.5,
+                    zorder=1, label=lbl_obs
+                )
+                ax.add_patch(circle)
+
+                lbl_hard = 'Hard Limit' if i == 0 else None
+                hard_circle = patches.Circle(
+                    (oE - offset, oN - offset), oR + hard_zone_margin,
+                    edgecolor='red', facecolor='none', linewidth=1.5,
+                    linestyle=':', zorder=1, label=lbl_hard
+                )
+                ax.add_patch(hard_circle)
+
+            if env.global_path is not None and len(env.global_path) > 0:
+                ax.plot(
+                    env.global_path[:, 0] - offset,
+                    env.global_path[:, 1] - offset,
+                    color='cyan',
+                    linewidth=2,
+                    linestyle='--',
+                    label="Global Path",
+                    zorder=1
+                )
+
+            for name, data in results_dict.items():
+                traj = data['traj']
+                ax.plot(
+                    traj[:, 0] - offset,
+                    traj[:, 1] - offset,
+                    color=data['color'],
+                    linestyle=data['style'],
+                    linewidth=2.5,
+                    label=name,
+                    alpha=0.95,
+                    zorder=3
+                )
+
+                if "Model 3" in name:
+                    ax.scatter(
+                        traj[0, 0] - offset, traj[0, 1] - offset,
+                        marker='*', facecolor='black', s=220, edgecolors='black',
+                        label='Start Point', zorder=10
+                    )
+                    ax.scatter(
+                        traj[-1, 0] - offset, traj[-1, 1] - offset,
+                        marker='*', facecolor='white', s=220, edgecolors='black',
+                        label='End Point', zorder=10
+                    )
+
+            ax.set_title(title)
+            ax.set_xlabel("X Position [m]")
+            if ax is axes[0]:
+                ax.set_ylabel("Y Position [m]")
+            ax.grid(True, linestyle="--", alpha=0.4)
+            ax.axis('equal')
+
+            handles, labels = ax.get_legend_handles_labels()
+            if legend_handles is None:
+                uniq = {}
+                for h, l in zip(handles, labels):
+                    if l not in uniq:
+                        uniq[l] = h
+                legend_labels = list(uniq.keys())
+                legend_handles = list(uniq.values())
+
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc='lower center',
+            bbox_to_anchor=(0.5, -0.03),
+            ncol=4,
+            framealpha=0.9,
+            facecolor='white',
+            edgecolor='black'
+        )
+        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        plt.show()
+
+        # =====================================================
+        # Graph 2: Cross Track Error (1x3)
+        # =====================================================
+        fig, axes = plt.subplots(1, 3, figsize=(24, 6), sharey=True)
+        legend_handles = None
+        legend_labels = None
+
+        for ax, scenario_data in zip(axes, all_results):
+            results_dict = scenario_data["results"]
+            title = scenario_data["title"]
+
+            for name, data in results_dict.items():
+                min_len = min(len(data['time']), len(data['err']))
+                t_data = data['time'][:min_len]
+                err_data = data['err'][:min_len]
+
+                ax.plot(
+                    t_data,
+                    err_data,
                     color=data['color'],
                     linestyle=data['style'],
                     linewidth=2.2,
                     label=name
                 )
 
-        ax.set_title(title)
-        ax.set_xlabel("Time [s]")
-        if ax is axes[0]:
-            ax.set_ylabel("Yaw Rate [rad/s]")
-        ax.grid(True, linestyle="--", alpha=0.4)
+            ax.set_title(title)
+            ax.set_xlabel("Time [s]")
+            if ax is axes[0]:
+                ax.set_ylabel("Cross Track Error [m]")
+            ax.grid(True, linestyle="--", alpha=0.4)
 
-        handles, labels = ax.get_legend_handles_labels()
-        if legend_handles is None:
-            uniq = {}
-            for h, l in zip(handles, labels):
-                if l not in uniq:
-                    uniq[l] = h
-            legend_labels = list(uniq.keys())
-            legend_handles = list(uniq.values())
+            handles, labels = ax.get_legend_handles_labels()
+            if legend_handles is None:
+                uniq = {}
+                for h, l in zip(handles, labels):
+                    if l not in uniq:
+                        uniq[l] = h
+                legend_labels = list(uniq.keys())
+                legend_handles = list(uniq.values())
 
-    fig.legend(
-        legend_handles,
-        legend_labels,
-        loc='lower center',
-        bbox_to_anchor=(0.5, -0.03),
-        ncol=3,
-        framealpha=0.9,
-        facecolor='white',
-        edgecolor='black'
-    )
-    plt.tight_layout(rect=[0, 0.08, 1, 1])
-    plt.show()
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc='lower center',
+            bbox_to_anchor=(0.5, -0.03),
+            ncol=3,
+            framealpha=0.9,
+            facecolor='white',
+            edgecolor='black'
+        )
+        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        plt.show()
+
+        # =====================================================
+        # Graph 3: Yaw Rate (1x3)
+        # =====================================================
+        fig, axes = plt.subplots(1, 3, figsize=(24, 6), sharey=True)
+        legend_handles = None
+        legend_labels = None
+        window_size = 10
+
+        for ax, scenario_data in zip(axes, all_results):
+            results_dict = scenario_data["results"]
+            title = scenario_data["title"]
+
+            for name, data in results_dict.items():
+                if 'w' in data and len(data['w']) > 0:
+                    min_len = min(len(data['time']), len(data['w']))
+                    t_data = data['time'][:min_len]
+                    w_data = data['w'][:min_len]
+
+                    w_smooth = pd.Series(w_data).rolling(
+                        window=window_size,
+                        center=True,
+                        min_periods=1
+                    ).mean()
+
+                    ax.plot(
+                        t_data,
+                        w_smooth,
+                        color=data['color'],
+                        linestyle=data['style'],
+                        linewidth=2.2,
+                        label=name
+                    )
+
+            ax.set_title(title)
+            ax.set_xlabel("Time [s]")
+            if ax is axes[0]:
+                ax.set_ylabel("Yaw Rate [rad/s]")
+            ax.grid(True, linestyle="--", alpha=0.4)
+
+            handles, labels = ax.get_legend_handles_labels()
+            if legend_handles is None:
+                uniq = {}
+                for h, l in zip(handles, labels):
+                    if l not in uniq:
+                        uniq[l] = h
+                legend_labels = list(uniq.keys())
+                legend_handles = list(uniq.values())
+
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc='lower center',
+            bbox_to_anchor=(0.5, -0.03),
+            ncol=3,
+            framealpha=0.9,
+            facecolor='white',
+            edgecolor='black'
+        )
+        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        plt.show()
 
     # ---------------------------------------------------------
     # 3. 실험 목록 (색상: orange, Blue, Red / 스타일: 실선)
@@ -2425,9 +2594,9 @@ if __name__ == "__main__":
             env.time_table = []
             env.dist_error_table = []
             env.w_table = []
- 
+
             if exp['type'] == 'apf':
-               traj, _ = env.simulation(model="apf", render=False)
+                traj, _ = env.simulation(model="apf", render=False)
 
             elif exp['type'] == 'sac':
                 try:
@@ -2464,20 +2633,20 @@ if __name__ == "__main__":
     # =========================================================
     # 5. [추가된 부분] 정량적 지표 (비행 시간 & Max Error) 분석 및 출력
     # =========================================================
-    print("\n===== 정량적 지표 분석 결과 =====")
-
-    for name, data in results.items():
-        if 'err' in data and len(data['err']) > 0:
-            err_data = np.array(data['err'], dtype=float)
-            err_data = err_data[~np.isnan(err_data)]
-
-            total_time = data['time'][-1] if len(data['time']) > 0 else 0.0
-            max_err = np.max(err_data) if len(err_data) > 0 else np.nan
-            mean_err = np.mean(err_data) if len(err_data) > 0 else np.nan
-            p95_err = np.percentile(err_data, 95) if len(err_data) > 0 else np.nan
-
-            print(f"[{name}]")
-            print(f"  - Mean Error : {mean_err:.2f} m")
-            print(f"  - Max Error  : {max_err:.2f} m")
-            print(f"  - 95% Error  : {p95_err:.2f} m")
-            print(f"  - Time       : {total_time:.1f} s\n")
+    # print("\n===== 정량적 지표 분석 결과 =====")
+    #
+    # for name, data in results.items():
+    #     if 'err' in data and len(data['err']) > 0:
+    #         err_data = np.array(data['err'], dtype=float)
+    #         err_data = err_data[~np.isnan(err_data)]
+    #
+    #         total_time = data['time'][-1] if len(data['time']) > 0 else 0.0
+    #         max_err = np.max(err_data) if len(err_data) > 0 else np.nan
+    #         mean_err = np.mean(err_data) if len(err_data) > 0 else np.nan
+    #         p95_err = np.percentile(err_data, 95) if len(err_data) > 0 else np.nan
+    #
+    #         print(f"[{name}]")
+    #         print(f"  - Mean Error : {mean_err:.2f} m")
+    #         print(f"  - Max Error  : {max_err:.2f} m")
+    #         print(f"  - 95% Error  : {p95_err:.2f} m")
+    #         print(f"  - Time       : {total_time:.1f} s\n")
