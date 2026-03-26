@@ -2414,13 +2414,13 @@ if __name__ == "__main__":
             legend_handles,
             legend_labels,
             loc='lower center',
-            bbox_to_anchor=(0.5, -0.03),
+            bbox_to_anchor=(0.5, 0.02),
             ncol=4,
             framealpha=0.9,
             facecolor='white',
             edgecolor='black'
         )
-        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        plt.tight_layout(rect=[0, 0.12, 1, 1])
         plt.show()
 
         # =====================================================
@@ -2467,13 +2467,13 @@ if __name__ == "__main__":
             legend_handles,
             legend_labels,
             loc='lower center',
-            bbox_to_anchor=(0.5, -0.03),
+            bbox_to_anchor=(0.5, 0.02),
             ncol=3,
             framealpha=0.9,
             facecolor='white',
             edgecolor='black'
         )
-        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        plt.tight_layout(rect=[0, 0.12, 1, 1])
         plt.show()
 
         # =====================================================
@@ -2528,13 +2528,13 @@ if __name__ == "__main__":
             legend_handles,
             legend_labels,
             loc='lower center',
-            bbox_to_anchor=(0.5, -0.03),
+            bbox_to_anchor=(0.5, 0.02),
             ncol=3,
             framealpha=0.9,
             facecolor='white',
             edgecolor='black'
         )
-        plt.tight_layout(rect=[0, 0.08, 1, 1])
+        plt.tight_layout(rect=[0, 0.12, 1, 1])
         plt.show()
 
     # ---------------------------------------------------------
@@ -2542,21 +2542,21 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     experiments = [
         {
-            "name": "Model 1 (track+obs)",
+            "name": "Model 4 (eta+obs)",
             "type": "sac",
-            "path": "best_model",
+            "path": "sac_maze_checkpoint_model1",
             "color": "tab:blue",
             "style": "-"
         },
         {
-            "name": "Model 2 (track+obs+eta)",
+            "name": "Model 2 (eta+obs+track)",
             "type": "sac",
             "path": "sac_maze_checkpoint_model2",
             "color": "tab:orange",
             "style": "-"
         },
         {
-            "name": "Model 3 (track+obs+eta+time)",
+            "name": "Model 3 (eta+obs+track+time)",
             "type": "sac",
             "path": "sac_maze_checkpoint_1000000",
             "color": "tab:green",
