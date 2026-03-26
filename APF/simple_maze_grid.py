@@ -2319,9 +2319,9 @@ if __name__ == "__main__":
         plt.rcParams.update({
             'font.size': 16,
             'axes.titlesize': 18,
-            'axes.labelsize': 16,
-            'xtick.labelsize': 14,
-            'ytick.labelsize': 14,
+            'axes.labelsize': 12,
+            'xtick.labelsize': 11,
+            'ytick.labelsize': 11,
             'legend.fontsize': 18,
             'figure.titlesize': 20
         })
@@ -2423,12 +2423,12 @@ if __name__ == "__main__":
                 legend_handles = list(uniq.values())
 
         desired_order = [
-            'Global Path',
             'Obstacle',
+            'Model 5 (eta+obs)',
             'Hard Limit',
-            'Model 5 (eta+obs+track)',
-            'Model 6 (eta+obs+track+time)',
-            'Model 7 (eta+obs+track+time+eta)',
+            'Model 6 (eta+obs+track)',
+            'Global Path',
+            'Model 7 (eta+obs+track+time)',
             'Start Point',
             'End Point'
             ]
