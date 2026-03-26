@@ -2191,7 +2191,7 @@ if __name__ == "__main__":
             )
 
         # --- [추가된 부분] Model 3의 시작점과 도착점 별표 표시 ---
-            if "Model 3" in name:
+            if "Model 7" in name:
                 # 시작점 (Start Point) - 검은색 별
                 plt.scatter(
                     traj[0, 0] - offset, traj[0, 1] - offset,
@@ -2382,7 +2382,7 @@ if __name__ == "__main__":
                     zorder=3
                 )
 
-                if "Model 6" in name:
+                if "Model 7" in name:
                     ax.scatter(
                         traj[0, 0] - offset, traj[0, 1] - offset,
                         marker='*', facecolor='black', s=220, edgecolors='black',
@@ -2421,6 +2421,21 @@ if __name__ == "__main__":
                         uniq[l] = h
                 legend_labels = list(uniq.keys())
                 legend_handles = list(uniq.values())
+
+        desired_order = [
+            'Global Path',
+            'Obstacle',
+            'Hard Limit',
+            'Model 5 (eta+obs+track)',
+            'Model 6 (eta+obs+track+time)',
+            'Model 7 (eta+obs+track+time+eta)',
+            'Start Point',
+            'End Point'
+            ]
+
+        label_to_handle = dict(zip(legend_labels, legend_handles))
+        legend_labels = [label for label in desired_order if label in label_to_handle]
+        legend_handles = [label_to_handle[label] for label in legend_labels]
 
         fig.legend(
             legend_handles,
@@ -2554,21 +2569,21 @@ if __name__ == "__main__":
     # ---------------------------------------------------------
     experiments = [
         {
-            "name": "Model 4 (eta+obs)",
+            "name": "Model 5 (eta+obs)",
             "type": "sac",
             "path": "sac_maze_checkpoint_model1",
             "color": "tab:blue",
             "style": "-"
         },
         {
-            "name": "Model 5 (eta+obs+track)",
+            "name": "Model 6 (eta+obs+track)",
             "type": "sac",
             "path": "sac_maze_checkpoint_model2",
             "color": "tab:orange",
             "style": "-"
         },
         {
-            "name": "Model 6 (eta+obs+track+time)",
+            "name": "Model 7 (eta+obs+track+time)",
             "type": "sac",
             "path": "sac_maze_checkpoint_1000000",
             "color": "tab:green",
