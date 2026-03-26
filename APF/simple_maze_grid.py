@@ -2131,7 +2131,7 @@ if __name__ == "__main__":
 
     def visualize_comparison(env, results_dict):
         plt.rcParams.update({
-            'font.size': 16,
+            'font.size': 20,
             'axes.titlesize': 20,
             'axes.labelsize': 18,
             'xtick.labelsize': 16,
@@ -2382,7 +2382,7 @@ if __name__ == "__main__":
                     zorder=3
                 )
 
-                if "Model 3" in name:
+                if "Model 6" in name:
                     ax.scatter(
                         traj[0, 0] - offset, traj[0, 1] - offset,
                         marker='*', facecolor='black', s=220, edgecolors='black',
@@ -2400,6 +2400,18 @@ if __name__ == "__main__":
                 ax.set_ylabel("Y Position [m]")
             ax.grid(True, linestyle="--", alpha=0.4)
             ax.axis('equal')
+
+            if title == "Map 1":
+                ax.set_xlim(-650, 650)
+                ax.set_ylim(-850, 850)
+
+            elif title == "Map 2":
+                ax.set_xlim(-450, 450)
+                ax.set_ylim(-550, 650)
+
+            elif title == "Map 3":
+                ax.set_xlim(-230, 430)
+                ax.set_ylim(-450, 380)
 
             handles, labels = ax.get_legend_handles_labels()
             if legend_handles is None:
