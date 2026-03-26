@@ -2322,7 +2322,7 @@ if __name__ == "__main__":
             'axes.labelsize': 16,
             'xtick.labelsize': 14,
             'ytick.labelsize': 14,
-            'legend.fontsize': 14,
+            'legend.fontsize': 18,
             'figure.titlesize': 20
         })
 
@@ -2549,14 +2549,14 @@ if __name__ == "__main__":
             "style": "-"
         },
         {
-            "name": "Model 2 (eta+obs+track)",
+            "name": "Model 5 (eta+obs+track)",
             "type": "sac",
             "path": "sac_maze_checkpoint_model2",
             "color": "tab:orange",
             "style": "-"
         },
         {
-            "name": "Model 3 (eta+obs+track+time)",
+            "name": "Model 6 (eta+obs+track+time)",
             "type": "sac",
             "path": "sac_maze_checkpoint_1000000",
             "color": "tab:green",
